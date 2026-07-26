@@ -1,9 +1,15 @@
 # PinchBar × Logitech HID++ – Session-Handoff
 
-**Stand:** 24.07.2026, 16:32 CEST (verifiziert funktionsfähig zu diesem Zeitpunkt)
+**Stand:** 26.07.2026, 19:32 CEST (verifiziert funktionsfähig zu diesem Zeitpunkt)
 **Zweck dieses Dokuments:** Kompletten Kontext der bisherigen Recherche festhalten, damit die
 Session in einer neuen Umgebung/einem neuen Chat nahtlos fortgesetzt werden kann, ohne die
 gesamte Recherche zu wiederholen.
+
+> **Update 26.07.:** Abschnitt 3.6 (`/input_tracker/*`) wurde zu Ende getestet – siehe
+> **3.6a (Re-Arm-Mechanismus)** und **3.6b (Daumentasten-Negativbefund)** unten. Kurzfassung:
+> Der Pfad funktioniert einwandfrei für Standard-Maustasten (links/rechts/mitte), aber **nicht**
+> für die HID++-CID-Daumentasten (Back/Forward) – das ist vermutlich eine Sackgasse für diese
+> spezielle API in Bezug auf unser eigentliches Ziel. Nächste Schritte: Abschnitt 5.
 
 ---
 
@@ -33,7 +39,7 @@ Das ist technisch relevant (siehe unten).
 | Options+ Keystroke-/Gesture-Button-Zuweisung | ❌ Nur Einzel-Trigger, kein "Hold"-Zustand exportierbar |
 | Roher HID/HID++-Zugriff (IOHIDManager) | ⚠️ Technisch exakt das, was wir brauchen (Feature `0x1B04`, siehe unten) – aber **kernelseitig blockiert**, weil die Maus per **direktem Bluetooth** gekoppelt ist (nicht über Logi-Bolt-Dongle). Kein Workaround/Entitlement hilft hier für Drittanbieter-Apps. |
 | Options+ IPC-Unix-Socket – geratene `SUBSCRIBE`-Pfade | ❌ Bestätigt wirkungslos (leerer Test über 30s, alle Maustasten mehrfach gedrückt – nichts kam an). Deckt sich mit dokumentiertem Negativ-Befund für den Easy-Switch-Knopf im Referenz-Repo. |
-| Options+ IPC-Unix-Socket – **`/input_tracker/*` API** | 🟢 **DURCHBRUCH, aber noch nicht zu Ende getestet.** Per MITM-Proxy entdeckt: liefert echte `isDown`-Events für Tastatur. Ob `filter: ["MOUSE"]` auch Maustasten-Events liefert, ist der **nächste zu testende Schritt**. |
+| Options+ IPC-Unix-Socket – **`/input_tracker/*` API** | 🟡 **Zu Ende getestet, gemischtes Ergebnis.** `filter: ["MOUSE_BUTTON"]` liefert echte `isDown`-Events für **Standard**-Maustasten (links/rechts/mitte) – funktioniert einwandfrei mit Re-Arm-Pattern (Abschnitt 3.6a). Aber: Für die **Daumentasten (Back/Forward, CID 83/86)**, die wir eigentlich brauchen, kommen **null Events** – vermutlich weil HID++-CID-Buttons intern nicht an den IPC-Broadcast weitergereicht werden (Abschnitt 3.6b). **Sehr wahrscheinlich eine Sackgasse für unser eigentliches Ziel.** |
 
 ---
 
@@ -139,6 +145,68 @@ Ziel-Shortcut drückt) – nicht direkt zur Button-Zuweisung selbst (das läuft 
 oder `card_global_presets_osx_back`). Ob es einen analogen Dialog/Mechanismus für "Maustaste als
 Trigger erkennen" gibt (z. B. in Makro-Editor oder Smart Actions), wurde noch nicht erkundet.
 
+### 3.6a ZU ENDE GETESTET: `filter` = `MOUSE_BUTTON` ist der korrekte Enum-Wert
+
+`"MOUSE"` (Abschnitt 3.6, alter Zwischenstand) war falsch. Durchprobiert am 26.07. (nur
+`start`-Call, ohne Tastendruck nötig für den reinen Enum-Test):
+
+| Kandidat | Ergebnis |
+|---|---|
+| `MOUSE` | ❌ `INVALID_ARG` |
+| **`MOUSE_BUTTON`** | ✅ **`SUCCESS`** |
+| `SPECIAL_BUTTON`, `HIDPP_BUTTON`, `GESTURE_BUTTON`, `PROGRAMMABLE_BUTTON`, `VENDOR_BUTTON`, `DIVERTED_BUTTON`, `SMART_BUTTON`, `CID_BUTTON` | ❌ alle `INVALID_ARG` |
+
+`KEYBOARD` (aus dem ursprünglichen MITM-Fund) und `MOUSE_BUTTON` sind also vermutlich die
+einzigen zwei gültigen Filter-Werte (weiteres Raten wäre jetzt Zeitverschwendung – falls doch
+mehr gebraucht wird, siehe Ghidra-Ansatz in Abschnitt 5).
+
+**Event-Format bei Klicks der Standard-Maustaste (links, CID/hidUsage 1):**
+```json
+{"mouse": {"button": {"hidUsage": 1, "isDown": true}}}
+{"mouse": {"button": {"hidUsage": 1, "isDown": false}}}
+```
+Sauber alternierend bei jedem Klick/Loslassen – **echte Down/Up-Semantik bestätigt**, genau
+das, was PinchBar braucht (zumindest für Buttons, die dieses hidUsage-Schema nutzen).
+
+**WICHTIGER MECHANISMUS-FUND – Re-Arm-Pattern:** `/input_tracker/start` liefert **immer nur
+genau ein** nachfolgendes Event über den `SUBSCRIBE`d-Kanal, danach verstummt der Broadcast
+wieder (das erklärt die scheinbar "toten" Tests vom 24.07. – kein Bug, sondern Design, passend
+zum "Single-Capture"-UI-Flow). Um kontinuierlich Events zu bekommen, muss nach **jedem**
+empfangenen `/input_tracker/events`-Broadcast sofort ein neuer `SET /input_tracker/start`
+gesendet werden (re-arm). Mit diesem Pattern (Testskript `sniff_repeat.py`, `--restart`-Flag)
+kamen in einem 40s-Test 19 sauber alternierende Events für die linke Maustaste an. Für eine
+produktive Integration ist das der Kern-Loop: `on_event -> handle -> resend(start)`.
+
+### 3.6b NEGATIV-BEFUND: Daumentasten (Back/Forward, CID 83/86) liefern KEINE `input_tracker`-Events
+
+Mit demselben Re-Arm-Loop (`sniff_repeat.py --restart`), sowohl mit `--filter MOUSE_BUTTON`
+als auch mit `--filter KEYBOARD` (Theorie: evtl. HID-Consumer-Control-Codes wie "AC
+Back"/"AC Forward", die über den Tastatur-Pfad laufen könnten) getestet: **null Events**, egal
+wie oft/lang die Daumentasten gedrückt wurden, während die linke Maustaste im selben Testlauf
+zuverlässig weiter Events lieferte (Sanity-Check bestanden – der Mechanismus läuft, nur für
+diese Tasten kommt schlicht nichts).
+
+**Interpretation:** `/input_tracker/*` scheint nur generische OS-Level-Input-Events zu sehen
+(Standard-USB/BLE-HID-Tastatur-Scancodes, Standard-Maustasten-`hidUsage`). Die HID++-CID-Buttons
+(Back/Forward/SmartShift, siehe Abschnitt 3.3, Feature `0x1B04`) werden vom Agent intern
+vermutlich direkt an die Assignment/Action-Dispatch-Logik weitergereicht (z. B. um daraus eine
+Tastenkombination oder OS-Navigation zu feuern) – **ohne** jemals über den IPC-Socket an
+Drittanbieter-Listener gebroadcastet zu werden. Damit ist der `/input_tracker/*`-Pfad für unser
+eigentliches Ziel (Daumentasten-Hold-Erkennung) **sehr wahrscheinlich eine Sackgasse**, auch wenn
+er als generischer Maustasten/Tastatur-Sniffer (linke/rechte/mittlere Taste, normale Tastatur)
+technisch einwandfrei funktioniert.
+
+**Device-Detail-Korrektur (26.07.):** Aktuelle Device-ID der MX Anywhere 3S ist `dev00000041`
+(hat sich seit dem 24.07. durch Re-Pairing geändert, siehe Warnung in Abschnitt 3.4).
+`connectionType` im `/devices/list`-Payload zeigt exakt `"BLE"` (Bluetooth Low Energy) –
+technisch präziser als die bisherige Doku-Formulierung "direktes Bluetooth", ändert aber nichts
+an der grundsätzlichen Einschätzung aus Abschnitt 3.3. `specialKeys.programmable` bestätigt
+`[82, 83, 86, 196]` (Middle/Back/Forward/SmartShift) wie erwartet.
+
+**Test-Tool:** `~/Devel/logitech-ipc-protocol/sniff_repeat.py` (neu, 26.07., Ad-hoc-Skript,
+noch nicht committed) – Re-Arm-Loop um `input_tracker`, Parameter: `<duration> [--restart]
+[--filter WERT]`.
+
 ---
 
 ## 4. Tooling: `sniff_button_events.py`
@@ -190,60 +258,61 @@ PinchBars Swift/ObjC++-Stack).
 
 ## 5. Nächste Schritte (priorisiert)
 
-1. ~~`--filter MOUSE` testen~~ **bereits getestet, schlägt sofort mit `INVALID_ARG` fehl**
-   (siehe Zwischenstand in Abschnitt 3.6). `"MOUSE"` ist also der falsche Enum-Literal.
+**Zusammenfassung des Stands:** `/input_tracker/*` ist zu Ende getestet (Abschnitt 3.6a/3.6b).
+Es funktioniert technisch einwandfrei (inkl. Re-Arm-Pattern für kontinuierliche Events), aber
+**nicht für die Daumentasten**, die wir eigentlich ansteuern wollen – nur für Standard-Maustasten
+(links/rechts/mitte, generische `hidUsage`-Codes) und Tastatur. Reines API-Raten ist damit
+ausgereizt. Der Fokus verschiebt sich jetzt auf zwei grundsätzlich verschiedene Strategien:
 
-2. **Günstige Sofort-Versuche** (jeweils nur der `start`-Call, kein Tastendruck nötig, um
-   schnell weitere Kandidaten durchzuprobieren – erst wenn einer OHNE Fehler durchgeht, lohnt
-   sich das Warten+Tastendruck):
-   ```bash
-   cd ~/Devel/logitech-ipc-protocol
-   python3 sniff_button_events.py input_tracker --filter MOUSE_BUTTON --duration 3
-   python3 sniff_button_events.py input_tracker --filter POINTER --duration 3
-   python3 sniff_button_events.py input_tracker --filter HID_MOUSE --duration 3
-   python3 sniff_button_events.py input_tracker --filter BUTTON --duration 3
-   python3 sniff_button_events.py input_tracker --filter ALL --duration 3
-   # Filter ganz weglassen (evtl. anderes Payload-Schema als "filter"-Liste?)
-   ```
-   Sobald einer davon **ohne** `INVALID_ARG`/`INVALID_MESSAGE_RECEIVED` durchgeht: mit
-   `--duration 30` wiederholen und **währenddessen die Daumentaste drücken**.
+1. ~~`--filter MOUSE`/`MOUSE_BUTTON`/weitere Enum-Kandidaten testen~~ **erledigt** (siehe 3.6a).
+   `MOUSE_BUTTON` ist korrekt, liefert aber nur Standard-Tasten-Events, keine Daumentasten-Events
+   (3.6b). Weiteres Raten von Filter-Strings ist nicht mehr sinnvoll.
 
-3. **Falls alle Rate-Versuche fehlschlagen (wahrscheinlich): Ghidra-Ansatz** (jetzt priorisiert,
-   da reines Raten sich schon einmal als Sackgasse erwiesen hat) (Nutzer hat Ghidra bereits installiert – siehe Abschnitt 6): Die
-   `logioptionsplus_agent`-Binary (`/Library/Application Support/Logitech.localized/
-   LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent`) ist
-   vermutlich in C++ mit Protobuf gebaut. Protobuf-C++-Binaries betten bei nicht vollständig
-   gestripptem Reflection-Support oft die **komplette serialisierte
-   `FileDescriptorProto`-Descriptor-Pool** ein – das würde uns direkt und ohne weiteres Raten:
-   - alle gültigen Enum-Werte für `input_tracker`-`filter` (z. B. `MOUSE`, `GAMEPAD`, ...)
-   - alle Feldnamen der `Event`-Message-Variante für Maus (analog zu `keyboard.hidUsage`,
-     `keyboard.isDown`, `keyboard.virtualKeyId` – vermutlich sowas wie `mouse.controlId`,
-     `mouse.isDown`, `mouse.cid` o. ä.)
-   liefern. Vorgehen: In Ghidra nach Strings suchen, die nach Protobuf-Feldnamen aussehen
-   (`input_tracker`, `MouseEvent`, `controlId` etc.), von dort zu den referenzierenden
-   Funktionen/Datenstrukturen zurückverfolgen, ggf. mit einem Ghidra-Script nach
-   `FileDescriptorProto`-typischen Byte-Mustern (Feld-Tags `0x0a` für `name`, geschachtelte
-   Messages) suchen. Alternativ (schneller, ohne Ghidra): einfaches Python-Script, das die
-   Binary linear nach Blöcken durchsucht, die sich als `google.protobuf.FileDescriptorProto`
-   parsen lassen (`from google.protobuf import descriptor_pb2`).
+2. **Strategieentscheidung nötig, bevor es weitergeht** – zwei Optionen, die sich nicht
+   gegenseitig ausschließen, aber unterschiedlichen Aufwand/Erfolgsaussicht haben:
 
-4. **Sobald Maus-Events bestätigt sind:** Feldnamen/Struktur dokumentieren (Analog zu Abschnitt
-   3.6), dann grober Architektur-Entwurf für eine echte PinchBar-Integration:
+   **Option A: Ghidra-RE des Agent-Binaries, um eine ANDERE/tiefere IPC-Route für
+   HID++-CID-Events zu finden** (falls überhaupt eine existiert – nicht bestätigt, dass
+   `logioptionsplus_agent` CID-Button-Events überhaupt jemals extern broadcastet; könnte sein,
+   dass sie nur intern zwischen Assignment-Engine und Firmware ausgetauscht werden und **niemals**
+   den IPC-Socket erreichen, egal welcher Pfad geraten/gefunden wird).
+   - `logioptionsplus_agent`-Binary: `/Library/Application Support/Logitech.localized/
+     LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent`
+   - Vorgehen: Nach Strings suchen, die nach IPC-Pfaden/Protobuf-Message-Namen aussehen
+     (`divertedButtonsEvent`, `cid_reporting`, `special_keys`, `button_event`, `1b04`, `x1b04`,
+     etc.), von dort zu referenzierenden Funktionen zurückverfolgen. Falls Reflection-Support
+     nicht gestrippt ist: eingebetteten `FileDescriptorProto`-Pool extrahieren (Python-Skript mit
+     `google.protobuf.descriptor_pb2`, linear nach parsebaren Blöcken suchen – schneller als
+     Ghidra-UI, kein RE-Tool nötig).
+   - **Realistische Erwartungshaltung:** Das ist ein Reverse-Engineering-Vorhaben mit offenem
+     Ausgang, kein garantierter Fund.
+
+   **Option B: Praktischer Workaround – Maus über Logi-Bolt-USB-Empfänger statt direktem BLE
+   koppeln** (bereits in Abschnitt 3.3 als "bisher nicht verfolgt" notiert, jetzt aber
+   naheliegender, da Option A ungewiss ist). Falls die MX Anywhere 3S per Bolt-Dongle statt
+   direktem BLE gekoppelt wird, ist die HID++-Kommunikation ein normaler USB-HID-Transport, der
+   **nicht** unter die macOS-Bluetooth-Kernel-Sperre fällt. Dann könnte `IOHIDManager` (mit
+   Input-Monitoring-Berechtigung, ganz ohne Options+/IPC-Umweg) `setCidReporting(cid, divert=1)`
+   nutzen und echte `divertedButtonsEvent`-Reports direkt lesen – die technisch sauberste Lösung
+   aus Abschnitt 3.3, aber abhängig davon, ob der Nutzer einen Bolt-Empfänger besitzt/anschaffen
+   möchte. **Offene Frage: Hat der Nutzer einen Logi-Bolt-Empfänger zur Hand oder müsste er einen
+   kaufen?** Das sollte zuerst geklärt werden, bevor Zeit in Option A investiert wird.
+
+3. **Sobald eine der beiden Optionen tatsächlich CID-Button-Events liefert:** Feldnamen/Struktur
+   dokumentieren, dann grober Architektur-Entwurf für eine echte PinchBar-Integration:
    - Vermutlich als separater kleiner Helper-Prozess (Python-Prototyp zuerst, ggf. später
-     Swift-Rewrite mit `Network.framework`/`POSIX`-Unix-Socket-API) der sich mit dem
-     Options+-Agent-Socket verbindet, `input_tracker` für die relevante(n) CID(s) startet, und
-     Down/Up-Zustände über IPC (z. B. Distributed Notifications, ein eigener kleiner
-     Named-Pipe/Socket, oder direkt eingebettet in PinchBar als Swift-Code) an PinchBar
-     weiterreicht, wo `OtherMouseZoomMapping`/`PinchMapping` sie wie ein synthetisches
+     Swift-Rewrite mit `Network.framework`/`POSIX`-Unix-Socket-API bzw. direkt `IOHIDManager`
+     bei Option B) der die Down/Up-Zustände über IPC (z. B. Distributed Notifications, ein
+     eigener kleiner Named-Pipe/Socket, oder direkt eingebettet in PinchBar als Swift-Code) an
+     PinchBar weiterreicht, wo `OtherMouseZoomMapping`/`PinchMapping` sie wie ein synthetisches
      `otherMouseDown`/`otherMouseUp`-Event behandeln.
-   - **Offene Frage, die vor der Integration zu klären ist:** Blockiert `keyboardExclusive`
-     (bzw. ein analoges `mouseExclusive`?) während der Tracker aktiv ist die normale
-     Funktion der Maustaste für den Rest des Systems? Das müsste dauerhaft im Hintergrund
-     laufen (nicht nur kurz wie im UI-Dialog) – falls exklusiv, wäre das ein Problem.
-   - Lizenz-/Robustheits-Hinweis: Dies bleibt ein **undokumentiertes, jederzeit von Logitech
-     änderbares Protokoll** – für eine produktive PinchBar-Funktion müsste ein Fallback/Opt-in
-     mit klarer Fehlerbehandlung existieren, falls der Agent nicht läuft oder sich das Protokoll
-     ändert.
+   - Bei Option A zusätzlich offene Frage: Muss dort auch ein Re-Arm-Pattern implementiert werden
+     (siehe 3.6a), oder verhält sich ein neu gefundener Pfad anders (kontinuierlicher Stream)?
+   - Lizenz-/Robustheits-Hinweis: Bei Option A bleibt es ein **undokumentiertes, jederzeit von
+     Logitech änderbares Protokoll** – für eine produktive PinchBar-Funktion müsste ein
+     Fallback/Opt-in mit klarer Fehlerbehandlung existieren, falls der Agent nicht läuft oder
+     sich das Protokoll ändert. Option B ist insofern robuster, als sie auf offiziell
+     dokumentiertem HID++ (Abschnitt 3.3) statt komplett undokumentiertem IPC beruht.
 
 ---
 
@@ -288,6 +357,8 @@ Original-Repo, nicht auf einen eigenen Fork).
   https://github.com/pwr-Solaar/Solaar (beide nur Linux/Windows, keine macOS-Unterstützung)
 - Logi Actions SDK (nicht anwendbar, aber zur Vollständigkeit): https://logitech.github.io/actions-sdk-docs/
 - Unser Sniffer-Tool: `~/Devel/logitech-ipc-protocol/sniff_button_events.py`
+- Re-Arm-Test-Tool (26.07., ad-hoc, noch nicht committed): `~/Devel/logitech-ipc-protocol/sniff_repeat.py`
+  (`python3 sniff_repeat.py <duration> --restart --filter MOUSE_BUTTON|KEYBOARD`)
 
 ---
 
