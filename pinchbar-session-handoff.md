@@ -1,9 +1,20 @@
 # PinchBar × Logitech HID++ – Session-Handoff
 
-**Stand:** 26.07.2026, 19:32 CEST (verifiziert funktionsfähig zu diesem Zeitpunkt)
+**Stand:** 26.07.2026, ca. 20:15 CEST (verifiziert funktionsfähig zu diesem Zeitpunkt, Session
+pausiert auf Nutzerwunsch mitten in Abschnitt 3.7 / Option C)
 **Zweck dieses Dokuments:** Kompletten Kontext der bisherigen Recherche festhalten, damit die
 Session in einer neuen Umgebung/einem neuen Chat nahtlos fortgesetzt werden kann, ohne die
 gesamte Recherche zu wiederholen.
+
+> **WICHTIGSTER HINWEIS FÜR DEN NÄCHSTEN START:** Beide Logitech-Geräte (MX Anywhere 3 **und**
+> MX Keys) sind aktuell **nicht mehr per Bluetooth gekoppelt**, sondern über einen **Logitech
+> Unifying-USB-Empfänger** (nicht Bolt – der Nutzer hat die MX Anywhere 3, nicht 3S). Das war
+> eine bewusste Testumgebungs-Änderung (siehe 3.7), um rohen HID-Zugriff zu ermöglichen (der bei
+> direktem Bluetooth kernelseitig blockiert ist). **Das eigentliche Ziel bleibt aber
+> ausdrücklich, die Events später auch über Bluetooth abzugreifen** – der Dongle ist nur zum
+> Validieren/Verstehen des Protokolls gedacht. Siehe Abschnitt 3.7 für den genauen Stand und
+> Abschnitt 5 für die als Nächstes geplanten Schritte (HID++-2.0-Root/Feature-0x1B04-Implementierung,
+> noch nicht abgeschlossen).
 
 > **Update 26.07.:** Abschnitt 3.6 (`/input_tracker/*`) wurde zu Ende getestet – siehe
 > **3.6a (Re-Arm-Mechanismus)** und **3.6b (Daumentasten-Negativbefund)** unten. Kurzfassung:
@@ -23,6 +34,15 @@ gesamte Recherche zu wiederholen.
 > des Requests wurde trotz vieler Versuche noch nicht gefunden** – siehe Abschnitt 3.6c für
 > Details und Abschnitt 5 für den Vorschlag, wie das sauber (ohne weiteres Raten) zu Ende
 > gebracht werden könnte.
+>
+> **Update 26.07., noch später (aktuellster Stand):** Nutzer hat als Reaktion auf die
+> `/configure`-Sackgasse beide Geräte auf einen Logitech-Unifying-Dongle umgepairt, mit dem
+> expliziten Ziel, den rohen HID++-Weg (Abschnitt 3.3) direkt selbst zu implementieren, **als
+> Blaupause für eine spätere Bluetooth-Lösung**. Raw-HID-Zugriff aus Python wurde erfolgreich
+> aufgesetzt (`hidapi` via Homebrew + eigenes venv, da System-Python SIP-geschützt ist). Der
+> HID++-Rohkanal des Dongles wurde identifiziert. Die eigentliche HID++-2.0-Implementierung
+> (Feature-Discovery, `setCidReporting`) war **in Arbeit, aber noch nicht fertig/getestet**, als
+> die Session pausiert wurde. Siehe **Abschnitt 3.7** für den vollständigen Stand.
 
 ---
 
@@ -312,6 +332,128 @@ committed) – probiert mehrere Payload-Varianten für `/devices/special_keys_di
 durch. String-Dump der Binary liegt (aktuell nur temporär) unter
 `/var/folders/.../T/opencode/agent_strings.txt` – bei Bedarf einfach neu erzeugen (Befehl s.o.).
 
+### 3.7 IN ARBEIT (pausiert): Rohes HID++ 2.0 direkt über Logitech-Unifying-Dongle (Option C)
+
+**Kontext/Entscheidung:** Nachdem das Erraten des `/configure`-JSON-Schemas (3.6c) an seine
+Grenze kam, hat der Nutzer als pragmatischen nächsten Schritt entschieden: Statt weiter im
+Options+-IPC-Protokoll zu raten, **direkt den offiziell dokumentierten HID++-2.0-Weg
+(Abschnitt 3.3) selbst implementieren** – mit der Maus über einen physischen Dongle gekoppelt,
+damit die macOS-Bluetooth-Kernel-Sperre für `IOHIDManager`/rohen HID-Zugriff nicht greift.
+
+**WICHTIG – Ziel-Klarstellung vom Nutzer (explizit, nicht vergessen):** Der Dongle-Umweg ist
+**nur ein Testaufbau, um das Protokoll zu verstehen/validieren**. Das eigentliche Endziel bleibt,
+die Events **über Bluetooth** (die vom Nutzer bevorzugte, tatsächlich genutzte Kopplungsart)
+abzugreifen. Jeder hier gefundene Baustein muss also am Ende daraufhin bewertet werden, ob/wie
+er sich auf den BLE-Fall übertragen lässt (siehe "Offene Frage" ganz unten in diesem Abschnitt).
+
+**Hardware-Detail-Korrektur:** Der Nutzer hat einen **Logitech Unifying**-Empfänger (nicht Bolt –
+Bolt ist nur für die 3S-Variante bzw. neuere Geräte relevant; die vorhandene Maus ist die reguläre
+**MX Anywhere 3**, kein 3S). Für unsere Zwecke (roher USB-HID-Transport, keine BT-Kernel-Sperre)
+ist das gleichwertig zu Bolt – der in Abschnitt 3.3/5 erwähnte "Bolt-Workaround" gilt technisch
+genauso für Unifying.
+
+**Was bereits gemacht wurde:**
+
+1. **Umpairing:** Nutzer hat MX Anywhere 3 und MX Keys von Bluetooth getrennt und neu über den
+   Unifying-Dongle gekoppelt. Verifiziert per `sniff_button_events.py devices`:
+   ```
+   dev00000040 | MX Keys           | WIRELESS | 6b35b   (via USB Receiver)
+   dev00000041 | MX Anywhere 3     | WIRELESS | 6b025   (via USB Receiver)
+   dev00000042 | Logi Unifying receiver | USB | c52b
+   ```
+   `activeInterfaces[].path` zeigt jetzt `...USB Receiver@.../IOUSBHostInterface@2/
+   AppleUserUSBHostHIDDevice:N` statt eines BLE-Pfads – Device-IDs (`dev00000041` etc.) sind
+   unverändert geblieben (kein Re-Pairing-bedingter ID-Wechsel diesmal).
+
+2. **Raw-HID-Python-Zugriff aufgesetzt** (das System-Python `/usr/bin/python3` ist SIP-geschützt,
+   `DYLD_LIBRARY_PATH` wird dafür von macOS entfernt – deshalb Umweg über Homebrew-Python nötig):
+   ```bash
+   brew install hidapi                       # native libhidapi.dylib
+   brew install python@3.12                  # nicht-SIP-geschütztes Python
+   cd ~/Devel/logitech-ipc-protocol
+   /opt/homebrew/bin/python3.12 -m venv .venv
+   .venv/bin/pip install hid                 # Python-Bindings (ctypes-Wrapper um libhidapi)
+   ```
+   Funktionierender Testaufruf (liefert alle Logitech-HID-Interfaces):
+   ```bash
+   DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 -c "
+   import hid
+   for d in hid.enumerate():
+       if d.get('vendor_id') == 0x046d: print(d)
+   "
+   ```
+
+3. **HID-Interfaces des Unifying-Empfängers identifiziert** (vendor_id `0x046d` = 1133,
+   product_id `50475` = `0xC52B`, `product_string: 'USB Receiver'`), drei separate
+   `interface_number`/Pfad-Gruppen (jede Gruppe = eigener `path`, mehrere `usage_page`/`usage`-
+   Einträge pro Pfad):
+   | interface_number | path (Beispiel-Session) | usage_page(s) | Bedeutung |
+   |---|---|---|---|
+   | 0 | `DevSrvsID:4295060437` | `1` (usage 6 = Keyboard) | Tastatur-Reports |
+   | 1 | `DevSrvsID:4295060438` | `1` (usage 1/2), `12` (Consumer), `65468` (vendor) | Standard-Maus/Consumer-Reports |
+   | **2** | `DevSrvsID:4295060436` | **`65280` (= 0xFF00, vendor-spezifisch)**, usages 1/2/4 | **HID++-Rohkanal** (Short/Long/Very-Long-Reports) |
+
+   **Interface 2 (usage_page 0xFF00) ist der für uns relevante Kanal** – das entspricht exakt dem
+   aus der öffentlichen HID++-Doku (Abschnitt 3.3/3.7-Referenzen) bekannten Aufbau: Logitech-
+   Empfänger exponieren HID++ als vendor-defined Usage Page, mit Short Reports (7 Byte, Report-ID
+   `0x10`) und Long Reports (20 Byte, Report-ID `0x11`).
+
+   ⚠️ **Achtung, Pfad-Bytes sind nicht stabil:** Die `path`-Werte (`DevSrvsID:...`) sind
+   IOKit-Session-IDs, die sich bei jedem Neustart/Neuverbinden ändern können – vor jedem neuen
+   Testlauf per `hid.enumerate()` neu ermitteln, nie hardcoden.
+
+**Was als Nächstes geplant war (noch NICHT begonnen/getestet):**
+
+Vollständige HID++-2.0-Implementierung in Python (`hid.device().open_path(...)`, dann rohe
+7-/20-Byte-Reports schreiben/lesen), Ablauf laut öffentlicher Spezifikation:
+
+1. **Device-Index herausfinden:** Der Unifying-Dongle multiplext mehrere gepairte Geräte über
+   Device-Indizes (typischerweise `0x01`–`0x06`; `0xFF` = Empfänger selbst). Muss experimentell
+   ermittelt werden, welcher Index zur MX Anywhere 3 gehört (z. B. durchprobieren, welcher Index
+   auf eine `Root.GetFeature`-Anfrage sinnvoll antwortet statt eines HID++-Fehlercodes).
+2. **`Root.GetFeature(0x1B04)`** (Feature-Index `0x00` ist immer `IRoot`, Funktion 0 = `getFeature`)
+   aufrufen, um den Feature-Index für "Special Keys and Mouse Buttons" (`0x1B04`) auf diesem
+   Gerät zu bekommen (variiert pro Firmware).
+3. Mit diesem Feature-Index: `getCount()` (Funktion 0) und `getCidInfo(index)` (Funktion 1)
+   aufrufen, um zu verifizieren, dass CIDs `82/83/86/196` (Middle/Back/Forward/SmartShift, siehe
+   Abschnitt 3.3) tatsächlich in der Liste auftauchen.
+4. **`setCidReporting(cid, divert=1)`** (Funktion 3) für CID `83` und `86` aufrufen.
+5. Auf eingehende **Long Reports** (Report-ID `0x11`) mit passendem Feature-Index lauschen –
+   Funktion/Event `divertedButtonsEvent` (Funktion 0 als Notification, `swId`-Bit gesetzt)
+   enthält die Liste der aktuell gedrückten CIDs (CID erscheint = Down, verschwindet = Up).
+6. Bei Erfolg: Timing/Zuverlässigkeit prüfen (kommt das genauso sauber Down/Up wie beim
+   `input_tracker`-Re-Arm-Test in 3.6a, oder gibt es hier von Haus aus einen kontinuierlichen
+   Stream ohne Re-Arm-Bedarf – vermutlich Letzteres, da HID++-Notifications nicht das
+   "Single-Capture"-Verhalten von `input_tracker` haben sollten).
+
+**Referenz für exakte Byte-Formate:** https://lekensteyn.nl/files/logitech/x1b04_specialkeysmsebuttons.html
+(bereits in Abschnitt 3.3/7 verlinkt) sowie allgemeine HID++-1.0/2.0-Rahmenformat-Doku unter
+https://lekensteyn.nl/files/logitech/ (Index-Seite, Short/Long-Report-Grundlagen).
+
+**Offene Frage / Rückkopplung zum eigentlichen Ziel (Bluetooth):** Sobald dieser Weg über den
+Dongle funktioniert, bleibt die Kernfrage: Wie übertragen wir das auf den BLE-Fall, wo
+`IOHIDDeviceOpen()` für Drittanbieter-Apps kernelseitig blockiert ist (Abschnitt 3.3)? Zwei
+Ideen, die noch nicht untersucht wurden:
+   - **Direkter CoreBluetooth-GATT-Zugriff statt IOHIDManager:** Logitech-BLE-Mäuse exponieren
+     HID++ vermutlich über einen eigenen, vendor-spezifischen GATT-Service (nicht nur das
+     Standard-HID-over-GATT-Profil). Die macOS-Kernel-Sperre betrifft nach bisherigem
+     Kenntnisstand (Abschnitt 3.3) spezifisch `IOHIDManager`/Input-Device-Handling – **nicht**
+     zwingend rohen GATT-Zugriff über `CoreBluetooth` (eine komplett andere API-Ebene, die für
+     Nicht-Input-Peripheriegeräte normal von Drittanbieter-Apps genutzt wird). **Das ist eine
+     bisher rein hypothetische, ungeprüfte Idee** – müsste mit einem kleinen Swift/CoreBluetooth-
+     Testprogramm verifiziert werden (GATT-Services der Maus auflisten, schauen ob ein
+     Logitech-spezifischer Service/Characteristic sichtbar ist, versuchen zu subscriben).
+   - Alternativ: Falls CoreBluetooth nicht klappt, bleibt nur Option A (Options+-IPC-Schema
+     doch noch finden, Abschnitt 3.6c/5) als Weg, der mit BLE-gekoppelten Geräten funktioniert,
+     da Options+ selbst nachweislich BLE-HID++-Zugriff hat (sonst würden Back/Forward-Tasten
+     ja gar keine Aktion auslösen können).
+
+**Tools/Umgebung für Fortsetzung:**
+- Venv: `~/Devel/logitech-ipc-protocol/.venv` (Python 3.12, Paket `hid` installiert)
+- Aufruf-Pattern: `DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 <script>.py`
+- Noch kein Skript für die eigentliche HID++-Kommunikation geschrieben (nur Enumeration
+  getestet) – das ist der konkrete nächste Schritt.
+
 ---
 
 ## 4. Tooling: `sniff_button_events.py`
@@ -365,70 +507,77 @@ PinchBars Swift/ObjC++-Stack).
 
 **Zusammenfassung des Stands:** `/input_tracker/*` ist zu Ende getestet (Abschnitt 3.6a/3.6b) und
 **autoritativ als Sackgasse für Daumentasten bestätigt** (3.6c – vollständiger Filter-Enum
-ausgelesen, kein CID-Wert vorhanden). ABER: Direkt in der Binary wurde eine echte,
-vielversprechende Message-Familie für HID++-CID-Divert-Reporting gefunden
-(`SpecialKeysDivertRequest`, `TestKeyState`, Feature `feature_x1b04_special_keys` – Abschnitt
-3.6c). Der Pfad `/devices/special_keys_divert_state/configure` existiert nachweislich, aber das
-exakte JSON-Feldschema des Requests konnte trotz vieler plausibler Versuche noch nicht gefunden
-werden. Reines Raten (sowohl von Filter-Strings als auch von JSON-Feldnamen) ist jetzt an seiner
-Grenze angekommen.
+ausgelesen, kein CID-Wert vorhanden). Der Options+-IPC-Weg über `/devices/special_keys_divert_state/configure`
+(3.6c) existiert nachweislich, aber das exakte JSON-Feldschema wurde trotz vieler Versuche nicht
+gefunden – reines Raten ist ausgereizt. **Aktiver, in Arbeit befindlicher Pfad ist jetzt Option C
+(Abschnitt 3.7): rohes HID++ 2.0 direkt über einen Logitech-Unifying-Dongle**, unabhängig von
+Options+. Die Umgebung dafür ist bereits aufgesetzt (Geräte umgepairt, Python-Venv mit
+`hid`/`hidapi`, HID++-Rohkanal des Dongles identifiziert), die eigentliche Protokoll-
+Implementierung ist der unmittelbar nächste Schritt.
 
-1. ~~`--filter MOUSE`/`MOUSE_BUTTON`/weitere Enum-Kandidaten testen~~ **erledigt** (3.6a).
-   ~~Gibt es weitere `input_tracker`-Filter-Werte für Zusatztasten?~~ **Erledigt, autoritativ
-   verneint** (3.6c: Enum hat nur `NONE/MOUSE_MOVE/MOUSE_BUTTON/MOUSE_WHEEL/KEYBOARD`).
+**PRIORITÄT 1 – direkt weitermachen mit Option C (Abschnitt 3.7):**
 
-2. **Strategieentscheidung nötig, bevor es weitergeht** – drei Optionen:
+1. Skript schreiben, das über `.venv` (`DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3`)
+   den HID++-Interface-Pfad (usage_page `0xFF00`/`65280`) öffnet und:
+   - Kurze Reports (7 Byte: `0x10, deviceIndex, featureIndex, funcId<<4|swId, data0, data1, data2`)
+     senden/empfangen kann (Basis-Framing für HID++ 1.0/2.0).
+   - `Root.GetFeature(0x1B04)` an mehreren Device-Indizes (`0x01`.."0x06`) durchprobiert, bis der
+     Index gefunden ist, der zur MX Anywhere 3 gehört (nicht MX Keys/Performance MX/MX Master 3,
+     die auch am selben Dongle hängen).
+   - Feature-Index für `0x1B04` cached, dann `getCidInfo`/`getCount` aufruft, um CIDs 82/83/86/196
+     zu verifizieren.
+   - `setCidReporting(83, divert=1)` und `setCidReporting(86, divert=1)` sendet.
+   - Auf Long-Report-Notifications lauscht und rohe Bytes dekodiert (Doku:
+     https://lekensteyn.nl/files/logitech/x1b04_specialkeysmsebuttons.html).
+2. Nutzer bittet, Back/Forward zu drücken, prüfen ob Down/Up sauber ankommt (analog zum
+   Re-Arm-Test in 3.6a, aber hier idealerweise OHNE Re-Arm-Bedarf, da es sich um ein natives
+   HID++-Notification-Modell handelt, nicht um das "Single-Capture"-Verhalten von
+   `input_tracker`).
+3. **Danach sofort die Bluetooth-Rückübertragung angehen** (nicht vergessen – das ist das
+   eigentliche Ziel!): Kleines CoreBluetooth-Testprogramm (Swift, z. B. als Kommandozeilen-Tool
+   oder Xcode-Playground), das nach der MX Anywhere 3/MX Keys als BLE-Peripheral sucht (auch
+   wenn sie gerade über den Dongle gekoppelt sind, sollte das Gerät weiterhin per BLE
+   advertisen/verbindbar sein, ggf. dafür kurz wieder auf direktes Bluetooth zurückpairen) und
+   deren GATT-Services auflistet. Prüfen, ob ein Logitech-vendor-spezifischer Service (nicht das
+   Standard-HID-over-GATT-Profil) sichtbar ist und ob sich darüber ähnliche HID++-Frames
+   senden/empfangen lassen wie über den Dongle. **Das ist reine Hypothese (Abschnitt 3.7,
+   letzter Absatz) – noch nicht mal ansatzweise verifiziert**, aber der aktuell einzige konkrete
+   Ansatz für einen dritten, von Options+ unabhängigen BLE-Weg.
 
-   **Option A1 (empfohlen als Nächstes, da am billigsten): Registrierungscode für
-   `special_keys_divert_state/configure` in Ghidra/objdump lokalisieren.** Wir wissen jetzt
-   schon sehr genau, wonach zu suchen ist (deutlich gezielter als noch am Vormittag): Nach dem
-   String `"special_keys_divert_state/configure"` (bzw. dem Suffix davon) im Disassembler
-   suchen, die referenzierende Funktion finden, und von dort zurückverfolgen, welcher konkrete
-   Protobuf-Message-Typ per `JsonStringToMessage`/`ParseFromString` auf das eingehende Payload
-   angewendet wird. Das gibt die exakten Feldnamen ohne weiteres Raten. Deutlich kleinerer Scope
-   als die ursprüngliche "irgendwo im ganzen Binary nach der Route suchen"-Aufgabe aus der
-   vorherigen Planung.
+**PRIORITÄT 2 – falls Option C nicht funktioniert oder das BLE-Problem sich als unlösbar
+herausstellt, zurück zum Options+-IPC-Weg:**
+
+   **Option A1: Registrierungscode für `special_keys_divert_state/configure` in Ghidra/objdump
+   lokalisieren.** Nach dem String `"special_keys_divert_state/configure"` im Disassembler
+   suchen, referenzierende Funktion finden, zurückverfolgen welcher Protobuf-Message-Typ per
+   `JsonStringToMessage`/`ParseFromString` auf das Payload angewendet wird. Das gibt die exakten
+   Feldnamen ohne weiteres Raten.
    - `logioptionsplus_agent`-Binary: `/Library/Application Support/Logitech.localized/
      LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent`
    - String-Dump liegt bereits vor (siehe 3.6c), kann bei Bedarf neu erzeugt werden.
-   - Alternative ohne Ghidra: `google.protobuf.descriptor_pb2.FileDescriptorProto` auf die rohen
-     Bytes des Descriptor-Pools anwenden (exakte Feldnummern/-typen), auch wenn das nicht
-     automatisch die Pfad→Message-Zuordnung liefert – dafür bräuchte es zusätzlich den
-     Registrierungscode.
 
-   **Option A2 (Alternative/Ergänzung): MITM-Proxy während einer versteckten Test-/Debug-Ansicht
-   der UI.** Die gefundenen `Test*`-Messages (`TestKeyState`, `TestDeviceKeysState`,
-   `TestCidList`) deuten auf eine interne QA-/Debug-Oberfläche hin, die diesen Pfad evtl.
-   tatsächlich benutzt. Unklar, ob/wie diese in der normalen UI erreichbar ist (evtl. über ein
-   verstecktes Debug-Menü, Rechtsklick-Kontextmenü mit Modifier-Taste, oder eine Env-Variable
-   beim Start des Agents). Falls auffindbar: mit `sniff_button_events.py proxy` mitschneiden –
-   das gibt uns die korrekte Payload direkt "for free", ganz ohne weiteres Feldnamen-Raten.
+   **Option A2: MITM-Proxy während einer versteckten Test-/Debug-Ansicht der UI**, falls
+   auffindbar (die `Test*`-Messages aus 3.6c deuten auf eine interne QA-Oberfläche hin, die
+   `/configure` evtl. tatsächlich benutzt).
 
-   **Option B: Praktischer Workaround – Maus über Logi-Bolt-USB-Empfänger statt direktem BLE
-   koppeln** (bereits in Abschnitt 3.3 als "bisher nicht verfolgt" notiert). Falls die MX
-   Anywhere 3S per Bolt-Dongle statt direktem BLE gekoppelt wird, ist die HID++-Kommunikation ein
-   normaler USB-HID-Transport, der **nicht** unter die macOS-Bluetooth-Kernel-Sperre fällt. Dann
-   könnte `IOHIDManager` (mit Input-Monitoring-Berechtigung, ganz ohne Options+/IPC-Umweg)
-   `setCidReporting(cid, divert=1)` nutzen und echte `divertedButtonsEvent`-Reports direkt lesen
-   – die technisch sauberste Lösung aus Abschnitt 3.3, unabhängig vom Options+-IPC-Rätselraten.
-   **Offene Frage: Hat der Nutzer einen Logi-Bolt-Empfänger zur Hand oder müsste er einen
-   kaufen?**
+   Vorteil dieser Optionen gegenüber Option C: Funktioniert nachweislich auch mit BLE-gekoppelten
+   Geräten (da Options+ selbst nachweislich BLE-HID++-Zugriff hat), löst also das
+   Bluetooth-Ziel direkt mit, ohne Umweg über CoreBluetooth-Spekulation.
 
-3. **Sobald eine der beiden Optionen tatsächlich CID-Button-Events liefert:** Feldnamen/Struktur
-   dokumentieren, dann grober Architektur-Entwurf für eine echte PinchBar-Integration:
+3. **Sobald irgendein Weg (C oder A) tatsächlich CID-Button-Events liefert – über USB-Dongle
+   UND (wichtig!) über Bluetooth:** Feldnamen/Struktur dokumentieren, dann grober
+   Architektur-Entwurf für eine echte PinchBar-Integration:
    - Vermutlich als separater kleiner Helper-Prozess (Python-Prototyp zuerst, ggf. später
-     Swift-Rewrite mit `Network.framework`/`POSIX`-Unix-Socket-API bzw. direkt `IOHIDManager`
-     bei Option B) der die Down/Up-Zustände über IPC (z. B. Distributed Notifications, ein
-     eigener kleiner Named-Pipe/Socket, oder direkt eingebettet in PinchBar als Swift-Code) an
-     PinchBar weiterreicht, wo `OtherMouseZoomMapping`/`PinchMapping` sie wie ein synthetisches
-     `otherMouseDown`/`otherMouseUp`-Event behandeln.
+     Swift-Rewrite mit `Network.framework`/`POSIX`-Unix-Socket-API bzw. direkt `IOHIDManager`/
+     `CoreBluetooth` bei Option C) der die Down/Up-Zustände über IPC (z. B. Distributed
+     Notifications, ein eigener kleiner Named-Pipe/Socket, oder direkt eingebettet in PinchBar
+     als Swift-Code) an PinchBar weiterreicht, wo `OtherMouseZoomMapping`/`PinchMapping` sie wie
+     ein synthetisches `otherMouseDown`/`otherMouseUp`-Event behandeln.
    - Bei Option A zusätzlich offene Frage: Muss dort auch ein Re-Arm-Pattern implementiert werden
      (siehe 3.6a), oder verhält sich ein neu gefundener Pfad anders (kontinuierlicher Stream)?
    - Lizenz-/Robustheits-Hinweis: Bei Option A bleibt es ein **undokumentiertes, jederzeit von
-     Logitech änderbares Protokoll** – für eine produktive PinchBar-Funktion müsste ein
-     Fallback/Opt-in mit klarer Fehlerbehandlung existieren, falls der Agent nicht läuft oder
-     sich das Protokoll ändert. Option B ist insofern robuster, als sie auf offiziell
-     dokumentiertem HID++ (Abschnitt 3.3) statt komplett undokumentiertem IPC beruht.
+     Logitech änderbares Protokoll**. Option C basiert auf offiziell dokumentiertem HID++
+     (Abschnitt 3.3), ist also robuster – **falls** sich der BLE-Teil davon lösen lässt.
 
 ---
 
@@ -475,6 +624,15 @@ Original-Repo, nicht auf einen eigenen Fork).
 - Unser Sniffer-Tool: `~/Devel/logitech-ipc-protocol/sniff_button_events.py`
 - Re-Arm-Test-Tool (26.07., ad-hoc, noch nicht committed): `~/Devel/logitech-ipc-protocol/sniff_repeat.py`
   (`python3 sniff_repeat.py <duration> --restart --filter MOUSE_BUTTON|KEYBOARD`)
+- Divert-Konfigurations-Testtool (26.07., ad-hoc, noch nicht committed):
+  `~/Devel/logitech-ipc-protocol/test_divert.py` (probiert Payload-Varianten für
+  `/devices/special_keys_divert_state/configure` – bisher erfolglos, siehe 3.6c)
+- Raw-HID++-Testumgebung (26.07., Abschnitt 3.7): venv unter
+  `~/Devel/logitech-ipc-protocol/.venv` (Python 3.12 via Homebrew, Paket `hid`), benötigt
+  `brew install hidapi` + `DYLD_LIBRARY_PATH=/opt/homebrew/lib` beim Aufruf. Noch kein
+  eigenes HID++-Protokoll-Skript geschrieben (nur Geräte-Enumeration getestet).
+- HID++ Short/Long-Report-Rahmenformat (Grundlage für 3.7): https://lekensteyn.nl/files/logitech/
+  (Index-Seite verlinkt die einzelnen Feature-Specs, inkl. 0x1B04)
 
 ---
 
@@ -491,8 +649,8 @@ launchctl kickstart -k gui/$(id -u)/com.logi.cp-dev-mgr
 cd ~/Devel/logitech-ipc-protocol
 python3 sniff_button_events.py devices
 
-# NÄCHSTER SCHRITT: Maus-Events testen ("MOUSE" ist NICHT der richtige Filter-Wert, siehe oben --
-# erst einen gültigen Enum-Wert finden/raten, dann mit Daumentaste-Druck während der 30s testen)
+# Options+-IPC: Maus-Events testen (funktioniert für Standard-Tasten, NICHT für Daumentasten,
+# siehe 3.6a/3.6b; Re-Arm-Pattern in sniff_repeat.py --restart)
 python3 sniff_button_events.py input_tracker --filter MOUSE_BUTTON --duration 30
 
 # Falls nötig: MITM-Proxy für weitere UI-Flow-Exploration
@@ -500,4 +658,16 @@ python3 sniff_button_events.py input_tracker --filter MOUSE_BUTTON --duration 30
 python3 sniff_button_events.py proxy > out.txt 2>&1
 # ... Options+ UI neu öffnen, gewünschten Flow durchspielen, Ctrl-C ...
 grep -n '"verb": "SET"\|SUBSCRIBE\|input_tracker' out.txt | cut -c1-300
+
+# NÄCHSTER SCHRITT (Option C, Abschnitt 3.7): Raw-HID-Zugriff auf den Unifying-Dongle testen
+cd ~/Devel/logitech-ipc-protocol
+DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 -c "
+import hid
+for d in hid.enumerate():
+    if d.get('vendor_id') == 0x046d:
+        print(d)
+"
+# -> Interface mit usage_page 65280 (0xFF00) ist der HID++-Rohkanal (path ändert sich pro Session!)
+# Als Nächstes: HID++-2.0-Framing (Root.GetFeature, setCidReporting) darüber implementieren,
+# siehe Abschnitt 3.7 für den vollständigen Ablaufplan.
 ```
