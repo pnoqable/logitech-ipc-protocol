@@ -13,15 +13,33 @@
 //   1) Root.getFeature(0x1B04) -> ermittelt dynamisch den featureIndex (bei der
 //      getesteten MX Anywhere 3 bisher immer 0x09, aber nie hardcodieren - kann sich
 //      laut Firmware-Version/Geraet unterscheiden, siehe hidpp_thumb_buttons.py).
-//   2) setCidReporting(cid=83/Back, divert=1, dvalid=1) und dasselbe fuer 86/Forward,
-//      mit einer EIGENEN swId (0x1) - Options+ nutzt 0xC, damit bleiben wir
-//      unterscheidbar und stoeren uns nicht gegenseitig.
-//   3) Auf Notifications lauschen, divertedButtonsEvent (funcId=0, swId=0) decodieren
-//      und als DOWN/UP fuer Back/Forward ausgeben.
-//   4) Bei Beendigung (Ctrl-C) divert wieder auf 0 zuruecksetzen.
+//   2) Nur noch auf Notifications lauschen, divertedButtonsEvent (funcId=0, swId=0)
+//      decodieren und als DOWN/UP fuer Back/Forward ausgeben.
+//
+// WICHTIGER BEFUND (27.07.2026): Auf dieser Maus/mit dieser Logi-Options+-Version ist
+// Back/Forward (CID 83/86) OFFENBAR DAUERHAFT divertiert (divert=1) - vermutlich vom
+// laufenden `com.logi.cp-dev-mgr`-Agenten durchgesetzt/erzwungen, unabhaengig davon ob
+// unser eigenes Tool laeuft. Live verifiziert:
+//   - `setCidReporting(divert=0)` manuell gesetzt -> nach kurzer Zeit sprang der Wert von
+//     selbst wieder auf divert=1, OHNE dass wir etwas geschrieben haben.
+//   - Ein rein lauschendes Test-Skript OHNE jeglichen eigenen `setCidReporting`-Call hat
+//     trotzdem saubere `divertedButtonsEvent`-Notifications fuer Back/Forward empfangen.
+// Deshalb sendet dieses Skript bewusst KEIN setCidReporting mehr und muss beim Beenden
+// auch nichts zuruecksetzen - das war unnoetig (siehe `ble_hidpp_reset_divert.swift` und
+// `ble_hidpp_check_divert_state.swift` fuer die Tools, mit denen das verifiziert wurde,
+// und `pinchbar-session-handoff.md` Abschnitt 4 fuer die volle Herleitung). Falls sich das
+// bei einer anderen Maus/Firmware/Options+-Version anders verhaelt (Back/Forward liefern
+// gar keine Events), zuerst mit `ble_hidpp_check_divert_state.swift 83 86` pruefen und ggf.
+// `ble_hidpp_reset_divert.swift`-Logik umgekehrt nutzen um divert=1 selbst zu setzen.
 //
 // Usage: swift ble_hidpp_thumb_buttons.swift
 // Voraussetzung: MX Anywhere 3 per direktem macOS-Bluetooth gekoppelt (nicht der Dongle).
+// Ctrl-C beendet ueber das normale SIGINT-Default-Verhalten (Prozess terminiert sofort) -
+// bewusst KEIN eigener Signal-Handler mehr, da kein Cleanup noetig ist (siehe oben). Ein
+// frueherer Versuch mit eigenem SIGINT-Handler+DispatchSource hat sich als unzuverlaessig
+// erwiesen (loeste nicht immer aus, auch nicht im echten Vordergrund-Terminal) - da wir
+// aber ohnehin nichts mehr aufzuraeumen haben, ist das Default-Verhalten die robustere
+// Loesung.
 
 import Foundation
 import CoreBluetooth
@@ -38,8 +56,6 @@ let ROOT_FEATURE_INDEX: UInt8 = 0x00
 let FEATURE_ID_1B04: UInt16 = 0x1B04
 let OUR_SW_ID: UInt8 = 0x1
 
-let CID_BACK: UInt16 = 83
-let CID_FORWARD: UInt16 = 86
 let CID_NAMES: [UInt16: String] = [80: "Left", 81: "Right", 82: "Middle", 83: "Back", 86: "Forward", 196: "SmartShift"]
 
 func hidppFrame(featureIndex: UInt8, funcId: UInt8, swId: UInt8, params: [UInt8]) -> Data {
@@ -48,45 +64,17 @@ func hidppFrame(featureIndex: UInt8, funcId: UInt8, swId: UInt8, params: [UInt8]
     return Data(bytes)
 }
 
-func setCidReportingFrame(featureIndex: UInt8, swId: UInt8, cid: UInt16, divert: Bool, dvalid: Bool) -> Data {
-    let flags: UInt8 = (dvalid ? 0b0000_0010 : 0) | (divert ? 0b0000_0001 : 0)
-    let params: [UInt8] = [
-        UInt8((cid >> 8) & 0xFF), UInt8(cid & 0xFF),
-        flags,
-        0x00, 0x00, // remap = 0 (unveraendert lassen)
-    ]
-    return hidppFrame(featureIndex: featureIndex, funcId: 0x03, swId: swId, params: params)
-}
-
 final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var central: CBCentralManager!
     var peripheralRef: CBPeripheral?
     var hidppChar: CBCharacteristic?
     var feature1B04Index: UInt8?
     var pressedCids: Set<UInt16> = []
-    var resetSent = false
 
     func start() {
         central = CBCentralManager(delegate: self, queue: nil)
-        signal(SIGINT, SIG_IGN)
-        let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        sigintSrc.setEventHandler { [weak self] in
-            print("\nCtrl-C erkannt, setze divert zurueck und beende ...")
-            self?.resetAndExit()
-        }
-        sigintSrc.resume()
-    }
-
-    func resetAndExit() {
-        guard !resetSent, let p = peripheralRef, let c = hidppChar, let fi = feature1B04Index else {
-            exit(0)
-        }
-        resetSent = true
-        p.writeValue(setCidReportingFrame(featureIndex: fi, swId: OUR_SW_ID, cid: CID_BACK, divert: false, dvalid: true),
-                     for: c, type: .withoutResponse)
-        p.writeValue(setCidReportingFrame(featureIndex: fi, swId: OUR_SW_ID, cid: CID_FORWARD, divert: false, dvalid: true),
-                     for: c, type: .withoutResponse)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+        // Bewusst KEIN eigener SIGINT-Handler - Ctrl-C nutzt das Standardverhalten
+        // (sofortiges Beenden), siehe Kommentar oben.
     }
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
@@ -140,7 +128,6 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         guard let c = hidppChar else { return }
         let params: [UInt8] = [UInt8((FEATURE_ID_1B04 >> 8) & 0xFF), UInt8(FEATURE_ID_1B04 & 0xFF)]
         let req = hidppFrame(featureIndex: ROOT_FEATURE_INDEX, funcId: 0x00, swId: OUR_SW_ID, params: params)
-        print("  write: \(req.map { String(format: "%02x", $0) }.joined())")
         peripheral.writeValue(req, for: c, type: c.properties.contains(.write) ? .withResponse : .withoutResponse)
     }
 
@@ -148,15 +135,6 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         if let error = error {
             print("  Schreibfehler: \(error.localizedDescription)")
         }
-    }
-
-    func armDivert(peripheral: CBPeripheral, characteristic: CBCharacteristic, featureIndex: UInt8) {
-        print("Feature 0x1B04 -> featureIndex=0x\(String(format: "%02x", featureIndex)). Aktiviere divert fuer Back(83)/Forward(86) ...")
-        let backFrame = setCidReportingFrame(featureIndex: featureIndex, swId: OUR_SW_ID, cid: CID_BACK, divert: true, dvalid: true)
-        let fwdFrame = setCidReportingFrame(featureIndex: featureIndex, swId: OUR_SW_ID, cid: CID_FORWARD, divert: true, dvalid: true)
-        peripheral.writeValue(backFrame, for: characteristic, type: .withoutResponse)
-        peripheral.writeValue(fwdFrame, for: characteristic, type: .withoutResponse)
-        print("Divert aktiv. Druecke jetzt Back/Forward an der Maus (Ctrl-C zum Beenden, setzt Divert zurueck).")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -177,7 +155,9 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 let foundIndex = params[0]
                 if foundIndex != 0 {
                     feature1B04Index = foundIndex
-                    armDivert(peripheral: peripheral, characteristic: characteristic, featureIndex: foundIndex)
+                    print("Feature 0x1B04 -> featureIndex=0x\(String(format: "%02x", foundIndex)). "
+                          + "Lausche auf divertedButtonsEvent (kein eigenes setCidReporting noetig, "
+                          + "siehe Kommentar oben). Druecke jetzt Back/Forward an der Maus (Ctrl-C beendet).")
                 } else {
                     print("Feature 0x1B04 nicht gefunden (featureIndex=0). Abbruch.")
                     exit(1)
@@ -208,7 +188,6 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             }
             pressedCids = currentlyPressed
         }
-        // funcId==3 mit swId==unser eigener: ACK auf unser setCidReporting - ignorieren, ist erwartet.
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -220,6 +199,4 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 let client = Client()
 client.start()
 RunLoop.main.run(until: Date(timeIntervalSinceNow: runSeconds))
-print("\nTimeout erreicht, setze divert zurueck ...")
-client.resetAndExit()
-RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0))
+print("\nTimeout erreicht, beende.")

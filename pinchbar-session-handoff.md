@@ -24,19 +24,24 @@ implementiert. **Live-Test in dieser Session:** Skript lief parallel zu Options+
 wurden mehrfach gedrückt → saubere `DOWN Forward` / `UP Forward` / `DOWN Back` / `UP Back`
 Ausgabe, exakt wie beim USB-Dongle. Damit ist **das eigentliche technische Kernproblem des
 gesamten Projekts gelöst** – beide Transportwege (USB-Dongle und direktes Bluetooth) liefern
-jetzt echte CID-Down/Up-Events. Details und bekannter kleiner Bug (SIGINT-Handler) siehe
-Abschnitt 4.
+jetzt echte CID-Down/Up-Events.
+
+**🔑 Wichtiger Zusatzbefund (selten dokumentiert, siehe Abschnitt 4):** Auf aktuellen
+Logi-Options+-Versionen bleibt Back/Forward (CID 83/86) **dauerhaft divertiert**
+(`divert=1`) – vermutlich vom laufenden Agenten durchgesetzt. Native, nicht-diverted
+Weiterleitung an Apps scheint es dafür gar nicht mehr zu geben (live verifiziert: manuell auf
+`divert=0` zurückgesetzt → sprang von selbst wieder auf `1`, ganz ohne unser Zutun). Das
+bedeutet: **unser eigenes Tool muss `divert` gar nicht mehr selbst setzen** – ein rein
+lauschendes Skript ganz ohne `setCidReporting`-Aufruf empfängt die `divertedButtonsEvent`s
+trotzdem zuverlässig. `ble_hidpp_thumb_buttons.swift` wurde entsprechend vereinfacht (kein
+Schreibzugriff mehr, kein Cleanup beim Beenden nötig, dadurch auch der SIGINT-Bug behoben –
+einfach kein eigener Signal-Handler mehr nötig, Ctrl-C nutzt jetzt das Standardverhalten).
 
 **Beide Geräte (MX Anywhere 3, MX Keys) sind aktuell sowohl über den Unifying-Dongle als auch
 über direktes macOS-Bluetooth gekoppelt.** Der Dongle bleibt reiner Testaufbau – Endziel ist
 der Bluetooth-Pfad, der jetzt funktioniert. Der Logi-Options+-Agent (`com.logi.cp-dev-mgr`)
-lief während der gesamten Bluetooth-Tests normal weiter (kein Stoppen mehr nötig, da unser
-eigener `swId=0x1` von Options+' `swId=0xC` unterscheidbar ist) – bei Sessionstart trotzdem
-kurz prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?). **Wichtig:** Nach dem
-letzten Testlauf wurde der temporäre Divert auf Back/Forward per Reset-Skript wieder auf 0
-gesetzt – bei Sessionstart trotzdem prüfen, ob Back/Forward noch normal als Browser-Navigation
-funktionieren (falls nicht: `ble_hidpp_thumb_buttons.swift` kurz laufen lassen und per Ctrl-C
-sauber beenden, oder direkt divert=0 setzen, siehe Abschnitt 4).
+lief während der gesamten Bluetooth-Tests normal weiter, kein Stoppen mehr nötig – bei
+Sessionstart trotzdem kurz prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?).
 
 ---
 
@@ -237,33 +242,46 @@ während der Aufnahme – nicht weiter relevant für unser Ziel, absichtlich ign
 
 **✅ `ble_hidpp_thumb_buttons.swift` implementiert und LIVE GETESTET (27.07.2026 ~23:18
 CEST, direkt in dieser Session):**
-- Ablauf: `Root.getFeature(0x1B04)` dynamisch (kein Hardcoding) → liefert `featureIndex=0x09`
-  (live bestätigt) → `setCidReporting(cid=83/86, divert=1, dvalid=1)` mit eigenem `swId=0x1`
-  → Lauschen auf `divertedButtonsEvent` (`funcId=0, swId=0`) → DOWN/UP-Ausgabe.
-- **Live-Ergebnis (im Hintergrund laufen lassen, User hat mehrfach Back/Forward gedrückt):**
-  ```
-  DOWN  Forward
-  UP    Forward
-  ... (mehrfach wiederholt)
-  DOWN  Back
-  UP    Back
-  ... (mehrfach wiederholt)
-  ```
-  Sauber, wiederholbar, kein Rauschen – **identisch zuverlässig wie beim USB-Dongle**, aber
-  ohne Dongle, direkt über die bestehende Bluetooth-Kopplung. Lief parallel zum laufenden
-  Options+-Agent, ohne dass dieser gestoppt werden musste (unterschiedliche `swId` reicht
-  zur Trennung).
-- **⚠️ Bekannter Bug:** Der `SIGINT`-Handler (Ctrl-C setzt Divert zurück) hat im Test nicht
-  zuverlässig ausgelöst, als das Skript per `nohup ... &` im Hintergrund lief (kein
-  kontrollierendes Terminal). Bei normalem interaktivem `swift ble_hidpp_thumb_buttons.swift`
-  im Vordergrund (echtes Terminal, Ctrl-C per Tastatur) sollte das funktionieren – **in einer
-  Folgesession zuerst so verifizieren**, bevor man sich darauf verlässt. Als Fallback:
-  manuelles Reset-Skript (Struktur siehe unten) oder Divert bleibt bestehen, bis
-  `setCidReporting(divert=0)` erneut gesendet wird oder ein HID++-Konfigurationsreset
-  passiert (Feature 0x0020, laut Spec) – **kein bekannter automatischer Reset beim reinen
-  Verbindungsabbau**, also nach jedem Testlauf sicherheitshalber sauber zurücksetzen.
-- Nach dem Test wurde der Divert-Zustand mit einem Reset-Aufruf
-  (`setCidReporting(cid=83/86, divert=0, dvalid=1, swId=0x1)`) wieder auf 0 gesetzt.
+- Ablauf (erste Version): `Root.getFeature(0x1B04)` dynamisch (kein Hardcoding) → liefert
+  `featureIndex=0x09` (live bestätigt) → `setCidReporting(cid=83/86, divert=1, dvalid=1)` mit
+  eigenem `swId=0x1` → Lauschen auf `divertedButtonsEvent` (`funcId=0, swId=0`) →
+  DOWN/UP-Ausgabe.
+- **Live-Ergebnis:** saubere, wiederholbare `DOWN`/`UP`-Ausgabe für Forward und Back,
+  identisch zuverlässig wie beim USB-Dongle, lief parallel zum laufenden Options+-Agent ohne
+  Konflikte.
+- **⚠️ Bug entdeckt:** Der ursprüngliche `SIGINT`-Handler (sollte Ctrl-C abfangen und Divert
+  zurücksetzen) hat weder im Hintergrundprozess noch im echten interaktiven Terminal
+  zuverlässig ausgelöst (vom Nutzer selbst verifiziert). Prozess musste per `kill -9`
+  beendet werden.
+
+**🔑 Entscheidender Folge-Befund (27.07.2026, ~00:20–00:30 CEST, User-Beobachtung + live
+verifiziert):** Nutzer bemerkte, dass Options+' eigene zugewiesene Custom-Aktion für
+Back/Forward **weiterhin parallel auslöste**, während unser Skript lief – und vermutete,
+dass ein manueller "Divert zurücksetzen"-Schritt am Ende möglicherweise gar nicht nötig sei,
+da aktuelle Options+-Versionen `divert` ohnehin dauerhaft erzwingen. Live verifiziert (drei
+Schritte, alle mit echter Hardware bestätigt):
+1. `ble_hidpp_check_divert_state.swift` (reiner GET, siehe Tooling) zeigte
+   `divert=1, persist=0` für CID 83/86 – **ohne dass unser Skript in diesem Moment lief**.
+2. `ble_hidpp_reset_divert.swift` hat `divert=0` gesetzt (per GET erneut bestätigt) – danach
+   Back/Forward physisch gedrückt: **Options+' Custom-Aktion feuerte weiterhin**, UND kurze
+   Zeit später zeigte ein erneuter GET-Check von selbst wieder `divert=1`, ohne dass irgendein
+   Tool etwas geschrieben hätte.
+3. Ein komplett schreibfreies Test-Skript (nur `Root.getFeature` + Zuhören, **kein**
+   `setCidReporting`) empfing trotzdem saubere `divertedButtonsEvent`-Pakete für Back/Forward.
+
+**Schlussfolgerung:** Bei dieser Maus/Options+-Version ist Back/Forward permanent divertiert
+(vermutlich vom laufenden `com.logi.cp-dev-mgr`-Agenten durchgesetzt/erzwungen). Native,
+nicht-diverted Weiterleitung an Apps scheint es dafür praktisch nicht mehr zu geben – eine
+Erkenntnis, die online kaum dokumentiert zu sein scheint. **Praktische Konsequenz:** Unser
+Tool muss `divert` gar nicht selbst setzen und beim Beenden nichts zurücksetzen.
+
+**`ble_hidpp_thumb_buttons.swift` daraufhin vereinfacht und erneut live verifiziert:**
+- Kein `setCidReporting`-Aufruf mehr, nur noch `Root.getFeature` + Zuhören.
+- Kein Cleanup beim Beenden mehr nötig → **eigener SIGINT-Handler komplett entfernt**,
+  Ctrl-C nutzt jetzt das SIGINT-Standardverhalten (Prozess terminiert sofort) – behebt den
+  Bug, da es schlicht nichts mehr aufzuräumen gibt.
+- Live erneut getestet (inkl. `kill -INT` auf die vereinfachte Version): Events kommen weiter
+  sauber an, Prozess beendet sich jetzt zuverlässig.
 
 **Damit ist Abschnitt 4 vollständig abgeschlossen.** Nächste Schritte siehe Abschnitt 6
 (PinchBar-Integration).
@@ -280,6 +298,8 @@ CEST, direkt in dieser Session):**
 | `ble_gatt_probe.swift` | CoreBluetooth Service/Characteristic-Discovery | ✅ funktioniert |
 | `ble_hidpp_probe.swift` | Alte Framing-Hypothesen-Experimente (historisch) | 🗄️ obsolet, durch `ble_hidpp_thumb_buttons.swift` ersetzt |
 | **`ble_hidpp_thumb_buttons.swift`** | **Back/Forward Down/Up-Events über direktes Bluetooth (kein Dongle)** | **✅ fertig, live verifiziert** |
+| `ble_hidpp_check_divert_state.swift` | Reiner GET-Check von divert/persist/rawXY/remap für beliebige CIDs (ändert nichts) | ✅ fertig, funktioniert |
+| `ble_hidpp_reset_divert.swift` | Setzt `divert=0` für beliebige CIDs (manuelles Aufräumen nach Testläufen) | ✅ fertig, funktioniert |
 | `ble_pklg_decode.py` | Parst `.pklg`-Packet-Sniffs selbst (kein Wireshark nötig), decodiert Feature 0x1B04 | ✅ fertig, funktioniert |
 | `sniff_button_events.py` | Options+-IPC: `devices`, `subscribe`, `input_tracker`, `proxy`, `ws` | ✅ (siehe unten) |
 | `sniff_repeat.py` | Re-Arm-Loop für `input_tracker` | ✅ (nicht committed) |
@@ -297,12 +317,11 @@ CEST, direkt in dieser Session):**
 ## 6. Nächste Schritte (priorisiert)
 
 **Beide Transportwege (USB-Dongle und direktes Bluetooth) liefern jetzt echte CID-Down/Up-
-Events.** Der Fokus verschiebt sich komplett auf die PinchBar-Integration:
+Events, und `ble_hidpp_thumb_buttons.swift` ist in seiner finalen, vereinfachten Form fertig
+(kein Divert-Setzen/Zurücksetzen mehr nötig, SIGINT-Bug durch Verzicht auf eigenen Handler
+behoben).** Der Fokus verschiebt sich komplett auf die PinchBar-Integration:
 
-1. **`SIGINT`-Reset-Bug in `ble_hidpp_thumb_buttons.swift` fixen/verifizieren** (Abschnitt 4)
-   – wichtig für einen sauberen Dauerbetrieb, damit Back/Forward beim Beenden zuverlässig
-   wieder normal funktionieren.
-2. **PinchBar-Integration entwerfen:** `ble_hidpp_thumb_buttons.swift`-Logik in einen
+1. **PinchBar-Integration entwerfen:** `ble_hidpp_thumb_buttons.swift`-Logik in einen
    dauerhaften Helper-Prozess überführen (Swift-Package oder eingebetteter Code in PinchBar
    selbst?), der Back/Forward Down/Up in synthetische `otherMouseDown/Up`-CGEvents übersetzt
    (siehe `~/Devel/PinchBar/Utilities/CGEventExtensions.swift` für das bestehende Muster bei
@@ -313,13 +332,19 @@ Events.** Der Fokus verschiebt sich komplett auf die PinchBar-Integration:
    - Reconnect-Handling: Was passiert bei Bluetooth-Disconnect/Schlafmodus/Maus-Neustart?
      `centralManager(_:didDisconnectPeripheral:error:)` müsste implementiert werden (bisher
      nicht im Probe-Skript vorhanden, da nur für kurze Tests gedacht).
-   - Divert-Zustand dauerhaft aktiv lassen (persist=1 statt divert=1?) vs. nur während
-     PinchBar läuft temporär divertieren, siehe `persist`-Flag in der Spec (Abschnitt 2.1).
-   - Verhalten falls Options+ gleichzeitig läuft und ebenfalls Custom-Aktionen auf
-     Back/Forward gelegt hat (Konflikt um "wer divertiert zuerst"?) – noch nicht getestet.
-3. **Testen, ob das auch mit MX Keys oder anderen HID++-2.0-Mäusen funktioniert** (CID-Tabelle
-   und Feature-Index können abweichen, aber Root.GetFeature-Ansatz ist bereits generisch).
-4. **Falls die BLE-Variante doch instabil ist:** Fallback auf USB-Dongle-Weg
+   - ~~Divert-Zustand dauerhaft aktiv lassen vs. temporär~~ – erledigt/geklärt: divert ist
+     ohnehin bereits dauerhaft aktiv (siehe Abschnitt 4), unser Tool muss sich darum nicht
+     mehr kümmern.
+   - ~~Konflikt mit Options+ um "wer divertiert zuerst"~~ – erledigt/geklärt: kein Konflikt,
+     `divertedButtonsEvent` wird an alle lauschenden GATT-Clients gebroadcastet, mehrere
+     Listener (unser Tool + Options+) können problemlos gleichzeitig lauschen und
+     unabhängig reagieren (live verifiziert, Abschnitt 4).
+2. **Testen, ob das auch mit MX Keys oder anderen HID++-2.0-Mäusen funktioniert** (CID-Tabelle
+   und Feature-Index können abweichen, aber Root.GetFeature-Ansatz ist bereits generisch;
+   ebenfalls prüfen ob dort divert auch schon permanent aktiv ist oder ob dort doch noch
+   `setCidReporting(divert=1)` nötig ist – falls ja, `ble_hidpp_check_divert_state.swift`
+   nutzen um das vorab zu prüfen).
+3. **Falls die BLE-Variante doch instabil ist:** Fallback auf USB-Dongle-Weg
    (`hidpp_thumb_buttons.py`, Abschnitt 3.2) oder Priorität 2, Options+-IPC-Weg
    (Abschnitt 2.3) – Ghidra/objdump auf `logioptionsplus_agent`.
 
@@ -364,7 +389,11 @@ swift ble_gatt_probe.swift
 
 # CoreBluetooth: Back/Forward Down/Up-Events ueber direktes Bluetooth (fertig, funktioniert!)
 swift ble_hidpp_thumb_buttons.swift
-# Ctrl-C beendet (Reset-Bug siehe Abschnitt 4 - im Vordergrund/echtem Terminal testen)
+# Ctrl-C beendet sofort (kein Cleanup mehr noetig, siehe Abschnitt 4)
+
+# CoreBluetooth: aktuellen divert/persist-Zustand pruefen (aendert nichts) bzw. zuruecksetzen
+swift ble_hidpp_check_divert_state.swift [cid ...]   # Default: 83 86
+swift ble_hidpp_reset_divert.swift [cid ...]          # Default: 83 86
 
 # .pklg-Packet-Sniff (PacketLogger) selbst auswerten, kein Wireshark noetig
 python3 ble_pklg_decode.py "<datei>.pklg" --feature 0x09
