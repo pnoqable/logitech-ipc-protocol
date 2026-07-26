@@ -1,7 +1,8 @@
 # PinchBar × Logitech HID++ – Session-Handoff
 
-**Stand:** 26.07.2026, ca. 21:35 CEST. Session pausiert mitten im CoreBluetooth-Experiment
-(Abschnitt 3.6, "Offene Frage").
+**Stand:** 27.07.2026, ca. 00:20 CEST. **Kernziel technisch erreicht** – Back/Forward liefern
+jetzt live verifiziert echte Down/Up-Events über direktes Bluetooth (kein Dongle nötig). Fokus
+verschiebt sich auf PinchBar-Integration (Abschnitt 6).
 
 **Ziel:** Die Daumentasten (Back/Forward, HID++ CID 83/86) der Logitech MX Anywhere 3
 (gekoppelt via macOS-Bluetooth) als echte Down/Up-Events für PinchBar (`~/Devel/PinchBar`,
@@ -9,27 +10,33 @@
 Gebraucht werden echte Down/Up-Events (kein Einzel-Trigger), da PinchBar "gehaltene Taste +
 Scrollen" braucht, ohne dass Logi Options+ die Taste abfängt.
 
-**✅ Priorität 1 (Option C) – abgeschlossen und funktioniert:** `hidpp_thumb_buttons.py`
-implementiert die volle HID++-2.0-Kette (Root.GetFeature, getCount/getCidInfo,
-setCidReporting, divertedButtonsEvent-Decoding) über den Logitech-Unifying-USB-Dongle. Live
-verifiziert: Back/Forward liefern saubere, wiederholbare DOWN/UP-Events, auch bei gehaltener
-Taste. Details siehe Abschnitt 3.5.
+**✅ Priorität 1 (Option C, USB-Dongle) – abgeschlossen und funktioniert:**
+`hidpp_thumb_buttons.py` implementiert die volle HID++-2.0-Kette (Root.GetFeature,
+getCount/getCidInfo, setCidReporting, divertedButtonsEvent-Decoding) über den
+Logitech-Unifying-USB-Dongle. Live verifiziert: Back/Forward liefern saubere, wiederholbare
+DOWN/UP-Events, auch bei gehaltener Taste. Details siehe Abschnitt 3.5.
 
-**🟢 Aktiver Zwischenstand (Abschnitt 4):** CoreBluetooth-GATT-Zugriff auf die Maus
-funktioniert grundsätzlich und umgeht die `IOHIDManager`-Sperre für Bluetooth-Input-Geräte –
-der richtige vendor-spezifische GATT-Kanal wurde gefunden, Options+ nutzt nachweislich genau
-diesen Kanal. **Das Byte-Format ist jetzt entschlüsselt** (Packet-Sniff mit PacketLogger,
-`.pklg` selbst geparst mit neuem Tool `ble_pklg_decode.py`) – bit-genau gegen die offizielle
-0x1B04-Spec verifiziert an `getCidReporting`/`setCidReporting` für Left/Right. Fehlt noch:
-dieselben Aufrufe für Back/Forward (CID 83/86) und ein echtes `divertedButtonsEvent` live
-sehen – dann direkt Implementierung in `ble_hidpp_probe.swift`. Siehe Abschnitt 4 für Details.
+**✅ Priorität 1, Bluetooth-Variante (Abschnitt 4) – JETZT AUCH abgeschlossen und live
+verifiziert:** CoreBluetooth-GATT-Zugriff funktioniert komplett, ohne Dongle, direkt über
+macOS-Bluetooth. Das komplette BLE-HID++-Byteformat wurde per Packet-Sniff entschlüsselt
+(bit-genau gegen die offizielle 0x1B04-Spec verifiziert) und in `ble_hidpp_thumb_buttons.swift`
+implementiert. **Live-Test in dieser Session:** Skript lief parallel zu Options+, Back/Forward
+wurden mehrfach gedrückt → saubere `DOWN Forward` / `UP Forward` / `DOWN Back` / `UP Back`
+Ausgabe, exakt wie beim USB-Dongle. Damit ist **das eigentliche technische Kernproblem des
+gesamten Projekts gelöst** – beide Transportwege (USB-Dongle und direktes Bluetooth) liefern
+jetzt echte CID-Down/Up-Events. Details und bekannter kleiner Bug (SIGINT-Handler) siehe
+Abschnitt 4.
 
 **Beide Geräte (MX Anywhere 3, MX Keys) sind aktuell sowohl über den Unifying-Dongle als auch
-über direktes macOS-Bluetooth gekoppelt** (Bluetooth wurde in dieser Session für den
-CoreBluetooth-Test zusätzlich eingerichtet). Der Dongle bleibt reiner Testaufbau – Endziel ist
-der Bluetooth-Pfad. Der Logi-Options+-Agent (`com.logi.cp-dev-mgr`) wurde während der Session
-kurz gestoppt (sauberer GATT-Test ohne Störtraffic) und wieder gestartet – bei Sessionstart kurz
-prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?).
+über direktes macOS-Bluetooth gekoppelt.** Der Dongle bleibt reiner Testaufbau – Endziel ist
+der Bluetooth-Pfad, der jetzt funktioniert. Der Logi-Options+-Agent (`com.logi.cp-dev-mgr`)
+lief während der gesamten Bluetooth-Tests normal weiter (kein Stoppen mehr nötig, da unser
+eigener `swId=0x1` von Options+' `swId=0xC` unterscheidbar ist) – bei Sessionstart trotzdem
+kurz prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?). **Wichtig:** Nach dem
+letzten Testlauf wurde der temporäre Divert auf Back/Forward per Reset-Skript wieder auf 0
+gesetzt – bei Sessionstart trotzdem prüfen, ob Back/Forward noch normal als Browser-Navigation
+funktionieren (falls nicht: `ble_hidpp_thumb_buttons.swift` kurz laufen lassen und per Ctrl-C
+sauber beenden, oder direkt divert=0 setzen, siehe Abschnitt 4).
 
 ---
 
@@ -43,7 +50,7 @@ prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?).
 | Options+ IPC – `/input_tracker/*` | 🟡 Funktioniert für Standard-Maustasten, **beweisbar Sackgasse für CID-Daumentasten** (Details Abschnitt 3.3) |
 | Options+ IPC – `/devices/special_keys_divert_state/configure` | 🟡 Pfad existiert nachweislich, JSON-Feldschema nicht gefunden – Fallback als Priorität 2 (Abschnitt 5) |
 | **Option C: Rohes HID++ über USB-Dongle** | **✅ Funktioniert, live verifiziert** (Abschnitt 3.5) |
-| **Option C, Bluetooth-Variante: CoreBluetooth-GATT** | 🟢 Kanal gefunden, Byte-Format entschlüsselt, Back/Forward-CID + Event noch zu bestätigen (Abschnitt 4) |
+| **Option C, Bluetooth-Variante: CoreBluetooth-GATT** | **✅ Funktioniert, live verifiziert** (Abschnitt 4) |
 
 ---
 
@@ -149,11 +156,13 @@ Aufruf: `DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 hidpp_thumb_butto
 
 ---
 
-## 4. CoreBluetooth-Experiment (Option C, Bluetooth-Variante) – 🟡 IN ARBEIT
+## 4. CoreBluetooth-Experiment (Option C, Bluetooth-Variante) – ✅ ABGESCHLOSSEN
 
 **Frage:** Lässt sich HID++ direkt über Bluetooth abgreifen (ohne Dongle-Umweg), obwohl
-`IOHIDDeviceOpen()` für BT-Input-Geräte blockiert ist? Tools: `ble_gatt_probe.swift`
-(Service/Characteristic-Dump), `ble_hidpp_probe.swift` (Schreib/Notify-Test) – beide per
+`IOHIDDeviceOpen()` für BT-Input-Geräte blockiert ist? **Antwort: Ja.** Tools:
+`ble_gatt_probe.swift` (Service/Characteristic-Dump), `ble_hidpp_probe.swift` (ältere
+Framing-Hypothesen-Experimente, historisch, durch untenstehendes Tool ersetzt),
+`ble_hidpp_thumb_buttons.swift` (**finales, funktionierendes Tool**) – alle per
 `swift <script>.swift` ausführbar, kein Xcode-Projekt nötig.
 
 **✅ Bestätigt:**
@@ -211,26 +220,53 @@ https://lekensteyn.nl/files/logitech/x1b04_specialkeysmsebuttons.html):
   selbst bzw. eine Wheel-Ratchet-Konfiguration (Payload-Struktur passt zu
   Threshold-Werten/Modus-Auswahl 1 vs. 3) – nicht weiter verfolgt, da nicht das Ziel.
 
-**🟡 Noch offen:** CID 83 (Back) / 86 (Forward) wurden in diesem Capture nicht abgefragt
-(nur Left/Right) – vermutlich weil das Capture erst nach dem initialen Seiten-Load der
-Button-Seite startete, oder weil Back/Forward nur bei expliziter Interaktion
-(Neu-Zuweisung) abgefragt werden. Auch das eigentliche `divertedButtonsEvent`
-(Notification mit `swId=0`, bis zu 4 CIDs, siehe Spec) wurde noch nicht gesehen.
+**✅ Zweiter Sniff (`MX Anywhere 3 komplett.pklg`, 27.07.2026 ~01:12–01:13) – Back/Forward
++ echtes `divertedButtonsEvent` bestätigt:** Nutzer hat Back/Forward-Taste physisch gedrückt
+(Divert war bereits von einer früheren Custom-Zuweisung aktiv, kein `setCidReporting`-Write
+in diesem Capture sichtbar). `ble_pklg_decode.py --feature 0x09` zeigte saubere
+`divertedButtonsEvent`-Pakete:
+```
+feat=0x09 funcId=0 swId=0 raw=090000560000...  => divertedButtonsEvent -> pressed: 86(Forward)
+feat=0x09 funcId=0 swId=0 raw=090000000000...  => divertedButtonsEvent -> (keine Tasten gedrueckt)
+feat=0x09 funcId=0 swId=0 raw=090000530000...  => divertedButtonsEvent -> pressed: 83(Back)
+```
+Exakt passend zur Spec (Table 8: bis zu 4 CIDs als BE16, Liste endet bei `cid==0`).
+Nebenbefund: eine weitere Notification `funcId=2 swId=0` (z. B. `092000500100...`) tauchte
+periodisch für CID 80 (Left) auf, vermutlich Klick-Feedback des normalen Mausgebrauchs
+während der Aufnahme – nicht weiter relevant für unser Ziel, absichtlich ignoriert.
 
-**Nächste Schritte:**
-1. **Empfohlen:** Neuen Sniff durchführen, diesmal gezielt auf Back/Forward: in Options+
-   der MX Anywhere 3 eine **Custom-Aktion auf Back oder Forward zuweisen** (das triggert
-   garantiert `setCidReporting(cid=83/86, divert=1, dvalid=1, ...)`), danach die Taste
-   **physisch drücken/halten** (sollte ein `divertedButtonsEvent` mit `cid=83` bzw. `86`
-   auslösen). Auswertung direkt mit `ble_pklg_decode.py <neue-datei>.pklg --feature 0x09`.
-2. Mit den jetzt bekannten Byte-Formaten (`getCidInfo`, `getCidReporting`,
-   `setCidReporting`) kann `ble_hidpp_probe.swift` jetzt korrekt implementiert werden
-   (eigenes `setCidReporting(83, divert=1)` + `divertedButtonsEvent`-Listener), OHNE
-   weiteren Sniff – das eigentliche Ziel (Back/Forward Down/Up über BLE) ist damit
-   vermutlich direkt erreichbar.
-3. Falls das Schreiben eigener Requests wider Erwarten nicht funktioniert: zurück zu
-   Priorität 2 (Abschnitt 2.3) – Ghidra/objdump, jetzt mit konkreter Suchspur (Service
-   `00010000-...`/Characteristic `00010001-...`, swId `0xC`).
+**✅ `ble_hidpp_thumb_buttons.swift` implementiert und LIVE GETESTET (27.07.2026 ~23:18
+CEST, direkt in dieser Session):**
+- Ablauf: `Root.getFeature(0x1B04)` dynamisch (kein Hardcoding) → liefert `featureIndex=0x09`
+  (live bestätigt) → `setCidReporting(cid=83/86, divert=1, dvalid=1)` mit eigenem `swId=0x1`
+  → Lauschen auf `divertedButtonsEvent` (`funcId=0, swId=0`) → DOWN/UP-Ausgabe.
+- **Live-Ergebnis (im Hintergrund laufen lassen, User hat mehrfach Back/Forward gedrückt):**
+  ```
+  DOWN  Forward
+  UP    Forward
+  ... (mehrfach wiederholt)
+  DOWN  Back
+  UP    Back
+  ... (mehrfach wiederholt)
+  ```
+  Sauber, wiederholbar, kein Rauschen – **identisch zuverlässig wie beim USB-Dongle**, aber
+  ohne Dongle, direkt über die bestehende Bluetooth-Kopplung. Lief parallel zum laufenden
+  Options+-Agent, ohne dass dieser gestoppt werden musste (unterschiedliche `swId` reicht
+  zur Trennung).
+- **⚠️ Bekannter Bug:** Der `SIGINT`-Handler (Ctrl-C setzt Divert zurück) hat im Test nicht
+  zuverlässig ausgelöst, als das Skript per `nohup ... &` im Hintergrund lief (kein
+  kontrollierendes Terminal). Bei normalem interaktivem `swift ble_hidpp_thumb_buttons.swift`
+  im Vordergrund (echtes Terminal, Ctrl-C per Tastatur) sollte das funktionieren – **in einer
+  Folgesession zuerst so verifizieren**, bevor man sich darauf verlässt. Als Fallback:
+  manuelles Reset-Skript (Struktur siehe unten) oder Divert bleibt bestehen, bis
+  `setCidReporting(divert=0)` erneut gesendet wird oder ein HID++-Konfigurationsreset
+  passiert (Feature 0x0020, laut Spec) – **kein bekannter automatischer Reset beim reinen
+  Verbindungsabbau**, also nach jedem Testlauf sicherheitshalber sauber zurücksetzen.
+- Nach dem Test wurde der Divert-Zustand mit einem Reset-Aufruf
+  (`setCidReporting(cid=83/86, divert=0, dvalid=1, swId=0x1)`) wieder auf 0 gesetzt.
+
+**Damit ist Abschnitt 4 vollständig abgeschlossen.** Nächste Schritte siehe Abschnitt 6
+(PinchBar-Integration).
 
 ---
 
@@ -242,8 +278,9 @@ Button-Seite startete, oder weil Back/Forward nur bei expliziter Interaktion
 |---|---|---|
 | `hidpp_thumb_buttons.py` | Rohes HID++ 2.0 über Unifying-Dongle, Back/Forward Down/Up-Events | ✅ fertig |
 | `ble_gatt_probe.swift` | CoreBluetooth Service/Characteristic-Discovery | ✅ funktioniert |
-| `ble_hidpp_probe.swift` | Gezielter GATT-Schreib/Notify-Test (HID++-Framing-Hypothesen) | 🟢 Byte-Format jetzt bekannt, Skript noch nicht mit korrektem Framing aktualisiert |
-| `ble_pklg_decode.py` | Parst `.pklg`-Packet-Sniffs selbst (kein Wireshark nötig), decodiert Feature 0x1B04 | ✅ neu, funktioniert |
+| `ble_hidpp_probe.swift` | Alte Framing-Hypothesen-Experimente (historisch) | 🗄️ obsolet, durch `ble_hidpp_thumb_buttons.swift` ersetzt |
+| **`ble_hidpp_thumb_buttons.swift`** | **Back/Forward Down/Up-Events über direktes Bluetooth (kein Dongle)** | **✅ fertig, live verifiziert** |
+| `ble_pklg_decode.py` | Parst `.pklg`-Packet-Sniffs selbst (kein Wireshark nötig), decodiert Feature 0x1B04 | ✅ fertig, funktioniert |
 | `sniff_button_events.py` | Options+-IPC: `devices`, `subscribe`, `input_tracker`, `proxy`, `ws` | ✅ (siehe unten) |
 | `sniff_repeat.py` | Re-Arm-Loop für `input_tracker` | ✅ (nicht committed) |
 | `test_divert.py` | Payload-Varianten für `/configure` | 🟡 (nicht committed) |
@@ -259,20 +296,32 @@ Button-Seite startete, oder weil Back/Forward nur bei expliziter Interaktion
 
 ## 6. Nächste Schritte (priorisiert)
 
-1. **Back/Forward-CID-Traffic + `divertedButtonsEvent` sniffen** (Abschnitt 4): Custom-Aktion
-   auf Back/Forward in Options+ zuweisen (triggert `setCidReporting(divert=1)`), Taste
-   drücken/halten, mit PacketLogger mitschneiden, mit `ble_pklg_decode.py --feature 0x09`
-   auswerten.
-2. **`ble_hidpp_probe.swift` mit jetzt bekanntem Framing neu implementieren:**
-   `setCidReporting(cid=83/86, divert=1, dvalid=1)` schreiben + auf
-   `divertedButtonsEvent`-Notifications lauschen (swId=0). Eigenen swId (z. B. `0x1`,
-   nicht `0xC`) verwenden, um Options+-eigenen Traffic unterscheiden zu können.
-3. **Falls das scheitert:** Priorität 2, Options+-IPC-Weg (Abschnitt 2.3) – Ghidra/objdump auf
-   `logioptionsplus_agent`, jetzt mit konkreter Suchspur (GATT-UUIDs, swId `0xC`).
-4. **Sobald ein Weg (Dongle UND Bluetooth) CID-Events liefert:** PinchBar-Integration
-   entwerfen – vermutlich separater Helper-Prozess, der Down/Up über IPC an PinchBar
-   weiterreicht (behandelt wie synthetisches `otherMouseDown/Up`). Options+-IPC-Weg bliebe
-   undokumentiertes, änderbares Protokoll; HID++-Weg ist robuster (offiziell dokumentiert).
+**Beide Transportwege (USB-Dongle und direktes Bluetooth) liefern jetzt echte CID-Down/Up-
+Events.** Der Fokus verschiebt sich komplett auf die PinchBar-Integration:
+
+1. **`SIGINT`-Reset-Bug in `ble_hidpp_thumb_buttons.swift` fixen/verifizieren** (Abschnitt 4)
+   – wichtig für einen sauberen Dauerbetrieb, damit Back/Forward beim Beenden zuverlässig
+   wieder normal funktionieren.
+2. **PinchBar-Integration entwerfen:** `ble_hidpp_thumb_buttons.swift`-Logik in einen
+   dauerhaften Helper-Prozess überführen (Swift-Package oder eingebetteter Code in PinchBar
+   selbst?), der Back/Forward Down/Up in synthetische `otherMouseDown/Up`-CGEvents übersetzt
+   (siehe `~/Devel/PinchBar/Utilities/CGEventExtensions.swift` für das bestehende Muster bei
+   der mittleren Maustaste). Offene Fragen dafür:
+   - Soll der Helper ein eigener LaunchAgent sein (robust gegen App-Neustarts) oder Teil von
+     PinchBar selbst (einfacher, aber CoreBluetooth-Reconnect-Logik muss dann in PinchBar
+     laufen)?
+   - Reconnect-Handling: Was passiert bei Bluetooth-Disconnect/Schlafmodus/Maus-Neustart?
+     `centralManager(_:didDisconnectPeripheral:error:)` müsste implementiert werden (bisher
+     nicht im Probe-Skript vorhanden, da nur für kurze Tests gedacht).
+   - Divert-Zustand dauerhaft aktiv lassen (persist=1 statt divert=1?) vs. nur während
+     PinchBar läuft temporär divertieren, siehe `persist`-Flag in der Spec (Abschnitt 2.1).
+   - Verhalten falls Options+ gleichzeitig läuft und ebenfalls Custom-Aktionen auf
+     Back/Forward gelegt hat (Konflikt um "wer divertiert zuerst"?) – noch nicht getestet.
+3. **Testen, ob das auch mit MX Keys oder anderen HID++-2.0-Mäusen funktioniert** (CID-Tabelle
+   und Feature-Index können abweichen, aber Root.GetFeature-Ansatz ist bereits generisch).
+4. **Falls die BLE-Variante doch instabil ist:** Fallback auf USB-Dongle-Weg
+   (`hidpp_thumb_buttons.py`, Abschnitt 3.2) oder Priorität 2, Options+-IPC-Weg
+   (Abschnitt 2.3) – Ghidra/objdump auf `logioptionsplus_agent`.
 
 ---
 
@@ -310,9 +359,15 @@ system_profiler SPBluetoothDataType | grep -A6 "MX Anywhere\|MX Keys"
 cd ~/Devel/logitech-ipc-protocol
 DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 hidpp_thumb_buttons.py
 
-# CoreBluetooth-Experiment: GATT-Services dumpen bzw. HID++-Framing testen
+# CoreBluetooth: GATT-Services dumpen
 swift ble_gatt_probe.swift
-swift ble_hidpp_probe.swift
+
+# CoreBluetooth: Back/Forward Down/Up-Events ueber direktes Bluetooth (fertig, funktioniert!)
+swift ble_hidpp_thumb_buttons.swift
+# Ctrl-C beendet (Reset-Bug siehe Abschnitt 4 - im Vordergrund/echtem Terminal testen)
+
+# .pklg-Packet-Sniff (PacketLogger) selbst auswerten, kein Wireshark noetig
+python3 ble_pklg_decode.py "<datei>.pklg" --feature 0x09
 
 # Options+-IPC: Geraete + Device-IDs auflisten
 python3 sniff_button_events.py devices
