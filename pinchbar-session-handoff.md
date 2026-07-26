@@ -15,12 +15,14 @@ setCidReporting, divertedButtonsEvent-Decoding) über den Logitech-Unifying-USB-
 verifiziert: Back/Forward liefern saubere, wiederholbare DOWN/UP-Events, auch bei gehaltener
 Taste. Details siehe Abschnitt 3.5.
 
-**🟡 Aktiver Zwischenstand (Abschnitt 3.6):** CoreBluetooth-GATT-Zugriff auf die Maus
+**🟢 Aktiver Zwischenstand (Abschnitt 4):** CoreBluetooth-GATT-Zugriff auf die Maus
 funktioniert grundsätzlich und umgeht die `IOHIDManager`-Sperre für Bluetooth-Input-Geräte –
-der richtige vendor-spezifische GATT-Kanal wurde gefunden und es ist bestätigt, dass Options+
-selbst genau diesen Kanal nutzt. Das genaue Byte-Format der Antworten ist aber noch nicht
-entschlüsselt. Empfohlener nächster Schritt: Bluetooth-Packet-Sniff von echtem Options+-Traffic
-als Referenz (siehe Abschnitt 3.6 für Details).
+der richtige vendor-spezifische GATT-Kanal wurde gefunden, Options+ nutzt nachweislich genau
+diesen Kanal. **Das Byte-Format ist jetzt entschlüsselt** (Packet-Sniff mit PacketLogger,
+`.pklg` selbst geparst mit neuem Tool `ble_pklg_decode.py`) – bit-genau gegen die offizielle
+0x1B04-Spec verifiziert an `getCidReporting`/`setCidReporting` für Left/Right. Fehlt noch:
+dieselben Aufrufe für Back/Forward (CID 83/86) und ein echtes `divertedButtonsEvent` live
+sehen – dann direkt Implementierung in `ble_hidpp_probe.swift`. Siehe Abschnitt 4 für Details.
 
 **Beide Geräte (MX Anywhere 3, MX Keys) sind aktuell sowohl über den Unifying-Dongle als auch
 über direktes macOS-Bluetooth gekoppelt** (Bluetooth wurde in dieser Session für den
@@ -41,7 +43,7 @@ prüfen (`launchctl list | grep cp-dev-mgr`, Maus/Tastatur normal?).
 | Options+ IPC – `/input_tracker/*` | 🟡 Funktioniert für Standard-Maustasten, **beweisbar Sackgasse für CID-Daumentasten** (Details Abschnitt 3.3) |
 | Options+ IPC – `/devices/special_keys_divert_state/configure` | 🟡 Pfad existiert nachweislich, JSON-Feldschema nicht gefunden – Fallback als Priorität 2 (Abschnitt 5) |
 | **Option C: Rohes HID++ über USB-Dongle** | **✅ Funktioniert, live verifiziert** (Abschnitt 3.5) |
-| **Option C, Bluetooth-Variante: CoreBluetooth-GATT** | 🟡 Kanal gefunden, Byte-Format offen (Abschnitt 3.6) |
+| **Option C, Bluetooth-Variante: CoreBluetooth-GATT** | 🟢 Kanal gefunden, Byte-Format entschlüsselt, Back/Forward-CID + Event noch zu bestätigen (Abschnitt 4) |
 
 ---
 
@@ -173,29 +175,62 @@ Aufruf: `DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 hidpp_thumb_butto
   (⚠️ nach vollem `bootout` greift `kickstart -k` nicht mehr, da der Job komplett entladen
   wurde – dann muss die App neu geöffnet werden statt `kickstart`).
 
-**🔴 Byte-Format noch NICHT entschlüsselt:**
-- `Root.GetFeature(0x1B04)`-Requests im USB-Short-Report-Format
-  (`0x10, devIdx, featIdx, funcId<<4|swId, d0,d1,d2`) mit devIdx `0x00`/`0x01`/`0xFF`, mit/ohne
-  führendes `0x10`-Marker-Byte getestet. Alle Varianten lieferten *eine* konsistente Antwort
-  (echter Kanal, kein Rauschen), aber:
-  - devIdx `0x00`/`0x01` (mit Marker): Marker+devIdx+featIdx korrekt echot, aber erwartetes
-    `funcId<<4|swId` (`0x05`) kam als `0x00` zurück – entweder andere Response-Struktur
-    (schon Nutzdaten = "Feature nicht gefunden") oder anderes Request-Encoding.
-  - devIdx `0xFF`: strukturell andere Antwort (`ff 10 ff 07 00...`), sieht nach Fehlerantwort
-    aus (`0x07`=`INVALID_FUNCTION`) – `0xFF` vermutlich ungültig bei Direkt-BLE (kein
-    Multi-Device-Empfänger wie beim Dongle).
+**✅ Byte-Format ENTSCHLÜSSELT (26.07.2026, ~22:44–22:46):** Packet-Sniff mit Apple
+PacketLogger (App aus "Additional Tools for Xcode", nicht im Standard-Xcode enthalten)
+während SmartShift-Regler-Bewegung in Options+ durchgeführt, Capture in
+`MX Anywhere 3 Write.pklg` gesichert. **Die `.pklg`-Datei wurde direkt selbst geparst**
+(kein Wireshark/tshark nötig – Format ist einfach genug für einen ~150-Zeilen-Python-Parser,
+siehe `ble_pklg_decode.py`), dadurch auch die Notify-Antworten erfasst (nicht nur die
+Writes wie im ersten Text-Export aus PacketLogger).
 
-**Nächste Schritte (nicht versucht):**
-1. **Empfohlen:** Bei laufendem Options+ eine echte 0x1B04-Aktion in der UI auslösen (z. B.
-   SmartShift-Regler bewegen) und mit PacketLogger/Bluetooth-Diagnose (`Xcode > Open Developer
-   Tool > Bluetooth`) den echten Request/Response-Bytestream mitschneiden – liefert
-   garantiert korrekte Referenz statt weiterem Raten.
-2. Systematisch `swId`-Werte 0x1–0xF und vertauschte Nibble-Reihenfolge (`swId<<4|funcId`)
-   durchprobieren, bei gestopptem Options+-Agent.
-3. Prüfen ob es eine zweite, noch unentdeckte Characteristic für Short- vs. Long-Reports gibt.
-4. Falls Byte-Format nicht zeitnah geknackt wird: zurück zu Priorität 2 (Abschnitt 2.3) – aber
-   jetzt mit konkreter Suchspur für Ghidra (Code, der Service `00010000-...`/Characteristic
-   `00010001-...` referenziert).
+**Bestätigtes BLE-HID++-Framing** (bit-genau gegen die offizielle x1b04-Spec geprüft,
+https://lekensteyn.nl/files/logitech/x1b04_specialkeysmsebuttons.html):
+```
+[featureIndex] [funcId<<4 | swId] [param0] [param1] ...
+```
+- **Kein Report-ID-Marker (`0x10`/`0x11`) und kein `devIndex`-Byte** wie beim USB-Dongle –
+  beides entfällt bei BLE, da pro GATT-Verbindung nur ein Gerät existiert (kein
+  Multi-Device-Empfänger wie der Unifying-Dongle). Das erklärt auch, warum alle Versuche
+  in der Vorsession mit `devIdx`-Präfix scheiterten (Byte-Offset war dadurch um 1 verschoben).
+- **`featureIndex 0x09` = Feature `0x1B04`** – identisch mit dem per USB-Dongle ermittelten
+  Wert (Abschnitt 3.2)! Feature-Indizes scheinen zwischen USB- und BLE-Transport identisch
+  zu sein (gleiche Firmware-Feature-Tabelle).
+- **Options+ nutzt `swId = 0xC`** (konstant) auf dem BLE-Kanal – eigene Tools sollten einen
+  anderen swId wählen (z. B. `0x1`), um eigene Requests von Options+-Traffic unterscheidbar
+  zu halten (analog zum USB-Dongle-Vorgehen).
+- **Notifications werden immer auf 19 Byte nullgepolstert** (= 20-Byte-Long-Report minus
+  Marker-Byte). Requests sind ungepolstert (nur so viele Bytes wie nötig – GATT
+  `writeWithoutResponse` erlaubt kurze Writes, Rest wird geräteseitig implizit als 0
+  behandelt).
+- **Live verifiziert (bit-genau passend zur Spec):** `getCidReporting(cid=80/81)` +
+  `setCidReporting(cid=80/81, ...)` für Left/Right-Maustaste (Options+ fragt diese beim
+  Öffnen der Geräteseite automatisch ab, unabhängig vom SmartShift-Regler). Decodierte
+  Flags: `divert=0, persist=0, rawXY=0, remap=0` – exakt passend zu "Left/Right nicht
+  divertable" aus unserer CID-Tabelle (Abschnitt 2.1).
+- Nebenbefund: `featureIndex 0x0D`/`0x0E` sind vermutlich die SmartShift-Feature (0x2130)
+  selbst bzw. eine Wheel-Ratchet-Konfiguration (Payload-Struktur passt zu
+  Threshold-Werten/Modus-Auswahl 1 vs. 3) – nicht weiter verfolgt, da nicht das Ziel.
+
+**🟡 Noch offen:** CID 83 (Back) / 86 (Forward) wurden in diesem Capture nicht abgefragt
+(nur Left/Right) – vermutlich weil das Capture erst nach dem initialen Seiten-Load der
+Button-Seite startete, oder weil Back/Forward nur bei expliziter Interaktion
+(Neu-Zuweisung) abgefragt werden. Auch das eigentliche `divertedButtonsEvent`
+(Notification mit `swId=0`, bis zu 4 CIDs, siehe Spec) wurde noch nicht gesehen.
+
+**Nächste Schritte:**
+1. **Empfohlen:** Neuen Sniff durchführen, diesmal gezielt auf Back/Forward: in Options+
+   der MX Anywhere 3 eine **Custom-Aktion auf Back oder Forward zuweisen** (das triggert
+   garantiert `setCidReporting(cid=83/86, divert=1, dvalid=1, ...)`), danach die Taste
+   **physisch drücken/halten** (sollte ein `divertedButtonsEvent` mit `cid=83` bzw. `86`
+   auslösen). Auswertung direkt mit `ble_pklg_decode.py <neue-datei>.pklg --feature 0x09`.
+2. Mit den jetzt bekannten Byte-Formaten (`getCidInfo`, `getCidReporting`,
+   `setCidReporting`) kann `ble_hidpp_probe.swift` jetzt korrekt implementiert werden
+   (eigenes `setCidReporting(83, divert=1)` + `divertedButtonsEvent`-Listener), OHNE
+   weiteren Sniff – das eigentliche Ziel (Back/Forward Down/Up über BLE) ist damit
+   vermutlich direkt erreichbar.
+3. Falls das Schreiben eigener Requests wider Erwarten nicht funktioniert: zurück zu
+   Priorität 2 (Abschnitt 2.3) – Ghidra/objdump, jetzt mit konkreter Suchspur (Service
+   `00010000-...`/Characteristic `00010001-...`, swId `0xC`).
 
 ---
 
@@ -207,7 +242,8 @@ Aufruf: `DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 hidpp_thumb_butto
 |---|---|---|
 | `hidpp_thumb_buttons.py` | Rohes HID++ 2.0 über Unifying-Dongle, Back/Forward Down/Up-Events | ✅ fertig |
 | `ble_gatt_probe.swift` | CoreBluetooth Service/Characteristic-Discovery | ✅ funktioniert |
-| `ble_hidpp_probe.swift` | Gezielter GATT-Schreib/Notify-Test (HID++-Framing-Hypothesen) | 🟡 Byte-Format offen |
+| `ble_hidpp_probe.swift` | Gezielter GATT-Schreib/Notify-Test (HID++-Framing-Hypothesen) | 🟢 Byte-Format jetzt bekannt, Skript noch nicht mit korrektem Framing aktualisiert |
+| `ble_pklg_decode.py` | Parst `.pklg`-Packet-Sniffs selbst (kein Wireshark nötig), decodiert Feature 0x1B04 | ✅ neu, funktioniert |
 | `sniff_button_events.py` | Options+-IPC: `devices`, `subscribe`, `input_tracker`, `proxy`, `ws` | ✅ (siehe unten) |
 | `sniff_repeat.py` | Re-Arm-Loop für `input_tracker` | ✅ (nicht committed) |
 | `test_divert.py` | Payload-Varianten für `/configure` | 🟡 (nicht committed) |
@@ -223,11 +259,17 @@ Aufruf: `DYLD_LIBRARY_PATH=/opt/homebrew/lib .venv/bin/python3 hidpp_thumb_butto
 
 ## 6. Nächste Schritte (priorisiert)
 
-1. **CoreBluetooth-Byte-Format knacken** (Abschnitt 4) – Packet-Sniff von echtem
-   Options+-Traffic empfohlen.
-2. **Falls das scheitert:** Priorität 2, Options+-IPC-Weg (Abschnitt 2.3) – Ghidra/objdump auf
-   `logioptionsplus_agent`, jetzt mit konkreter Suchspur (GATT-UUIDs).
-3. **Sobald ein Weg (Dongle UND Bluetooth) CID-Events liefert:** PinchBar-Integration
+1. **Back/Forward-CID-Traffic + `divertedButtonsEvent` sniffen** (Abschnitt 4): Custom-Aktion
+   auf Back/Forward in Options+ zuweisen (triggert `setCidReporting(divert=1)`), Taste
+   drücken/halten, mit PacketLogger mitschneiden, mit `ble_pklg_decode.py --feature 0x09`
+   auswerten.
+2. **`ble_hidpp_probe.swift` mit jetzt bekanntem Framing neu implementieren:**
+   `setCidReporting(cid=83/86, divert=1, dvalid=1)` schreiben + auf
+   `divertedButtonsEvent`-Notifications lauschen (swId=0). Eigenen swId (z. B. `0x1`,
+   nicht `0xC`) verwenden, um Options+-eigenen Traffic unterscheiden zu können.
+3. **Falls das scheitert:** Priorität 2, Options+-IPC-Weg (Abschnitt 2.3) – Ghidra/objdump auf
+   `logioptionsplus_agent`, jetzt mit konkreter Suchspur (GATT-UUIDs, swId `0xC`).
+4. **Sobald ein Weg (Dongle UND Bluetooth) CID-Events liefert:** PinchBar-Integration
    entwerfen – vermutlich separater Helper-Prozess, der Down/Up über IPC an PinchBar
    weiterreicht (behandelt wie synthetisches `otherMouseDown/Up`). Options+-IPC-Weg bliebe
    undokumentiertes, änderbares Protokoll; HID++-Weg ist robuster (offiziell dokumentiert).
