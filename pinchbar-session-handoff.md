@@ -9,7 +9,20 @@ gesamte Recherche zu wiederholen.
 > **3.6a (Re-Arm-Mechanismus)** und **3.6b (Daumentasten-Negativbefund)** unten. Kurzfassung:
 > Der Pfad funktioniert einwandfrei für Standard-Maustasten (links/rechts/mitte), aber **nicht**
 > für die HID++-CID-Daumentasten (Back/Forward) – das ist vermutlich eine Sackgasse für diese
-> spezielle API in Bezug auf unser eigentliches Ziel. Nächste Schritte: Abschnitt 5.
+> spezielle API in Bezug auf unser eigentliches Ziel.
+>
+> **Update 26.07., später:** Auf Nutzerfrage hin ("könnten noch andere Enums existieren?") wurde
+> die Agent-Binary direkt nach dem eingebetteten Protobuf-Schema durchsucht (`strings`, kein
+> Ghidra nötig – Reflection ist nicht gestrippt). Ergebnis: **Abschnitt 3.6c** – der
+> `input_tracker`-`Filter`-Enum hat autoritativ nur 5 Werte, keiner davon deckt CID-Buttons ab.
+> ABER: Es wurde eine **komplett andere, vielversprechende Message-Familie** gefunden
+> (`SpecialKeysDivertRequest`, `TestKeyState` mit `is_diverted`-Flags, Feature-Name
+> `feature_x1b04_special_keys` – exakte Übereinstimmung mit der HID++-0x1B04-Doku aus
+> Abschnitt 3.3!). Der zugehörige IPC-Pfad `/devices/special_keys_divert_state/configure`
+> existiert nachweislich (kommt durch den JSON-Parser durch), aber das **exakte Feld-Schema
+> des Requests wurde trotz vieler Versuche noch nicht gefunden** – siehe Abschnitt 3.6c für
+> Details und Abschnitt 5 für den Vorschlag, wie das sauber (ohne weiteres Raten) zu Ende
+> gebracht werden könnte.
 
 ---
 
@@ -207,6 +220,98 @@ an der grundsätzlichen Einschätzung aus Abschnitt 3.3. `specialKeys.programmab
 noch nicht committed) – Re-Arm-Loop um `input_tracker`, Parameter: `<duration> [--restart]
 [--filter WERT]`.
 
+### 3.6c NEUER ANSATZ: Protobuf-Reflection direkt aus der Binary auslesen (ohne Ghidra!)
+
+**Auslöser:** Nutzerfrage, ob es außer `KEYBOARD`/`MOUSE_BUTTON` noch weitere `input_tracker`-
+Filter-Werte geben könnte (z. B. für Zusatztasten). Antwort ließ sich **autoritativ** klären,
+ohne Ghidra zu öffnen:
+
+```bash
+strings -a "/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent" > agent_strings.txt
+```
+
+Der Agent ist mit **nicht gestripptem Protobuf-Reflection-Support** gebaut – der komplette
+`FileDescriptorProto`-Pool liegt als lesbarer Text im Binary (kurze Tag/Length-Bytes werden von
+`strings` einfach übersprungen, die Feld-/Message-/Enum-Namen bleiben aber in der korrekten
+Deklarationsreihenfolge erhalten). Das ist erheblich schneller als Ghidra und liefert 1:1 exakte
+Ergebnisse statt Vermutungen.
+
+**Ergebnis 1 – `input_tracker.Filter`-Enum ist jetzt vollständig und autoritativ bekannt:**
+```
+enum Filter { NONE, MOUSE_MOVE, MOUSE_BUTTON, MOUSE_WHEEL, KEYBOARD }
+```
+**Es gibt garantiert keinen weiteren Wert** (kein `GAMEPAD`, kein CID-/Spezialtasten-Wert). Damit
+ist zweifelsfrei (nicht nur empirisch wie in 3.6b) belegt: `/input_tracker/*` kann die
+HID++-CID-Buttons (Back/Forward/SmartShift) architektonisch **nicht** sehen – das Enum hat
+schlicht keinen Wert dafür.
+
+**Ergebnis 2 – Eine völlig andere, sehr vielversprechende Message-Familie existiert:**
+Direkt im selben Descriptor-Pool gefunden, unter `logi.protocol.devices`:
+```
+message DivertStateRequest { int32 control_id; bool divert; bool raw_xy; bool raw_wheel; }
+message SpecialKeysDivertRequest { repeated DivertStateRequest control_ids_list; }
+message DivertState { int32 control_id; bool divert; }
+message SpecialKeysDivertState { repeated DivertState control_ids_list; }
+
+message TestKeyState {
+  int32 ctrl_id;
+  bool is_diverted, is_diverted_valid;
+  bool is_persistently_diverted, is_persistently_diverted_valid;
+  bool is_raw_xy_reporting, is_raw_xy_reporting_valid;
+  bool is_force_raw_xy_reporting, is_force_raw_xy_reporting_valid;
+  int32 remapped_id;
+  bool is_reporting_analytics, is_reporting_analytics_valid;
+  bool is_raw_wheel_reporting, is_raw_wheel_reporting_valid;
+}
+message TestDeviceKeysState { repeated TestKeyState states; }
+message TestCidList { string device_id; }
+
+message TriggerEvent {
+  string device_id; Device.Type device_type; string slot_id;
+  TriggerEvent.State state;  // enum State { INACTIVE, START, ONE_SHOT }
+  ...
+}
+```
+Zusätzlich: ein Symbol `feature_x1b04_special_keys` (`_process_key_gesture_event`) – **exakte
+Übereinstimmung mit HID++ Feature `0x1B04`** aus Abschnitt 3.3! Das beweist: Der von uns
+gesuchte Mechanismus (`setCidReporting`/`divertedButtonsEvent`) ist **intern im Agent
+tatsächlich implementiert und adressierbar**, nur eben nicht über `/input_tracker/*`.
+
+**Gefundener, aber noch nicht funktionsfähiger Pfad:** `SET /devices/special_keys_divert_state/configure`
+- Existiert nachweislich: `GET` auf den Pfad → `"no handler for 'GET ...'"` (Pfad ist bekannt,
+  nur `GET` nicht unterstützt). `SET` mit **leerem Payload `{}`** kommt durch den JSON-Parser
+  durch (kein `INVALID_MESSAGE_RECEIVED` mehr!) und liefert einen Applikationsfehler:
+  `"Invalid special_keys_divert_state settings"` mit Response-Typ
+  `logi.protocol.card_register.TaskExecute`.
+- **Aber:** Jeder Versuch mit tatsächlichen Feldern (`controlId`/`divert`, `controlIdsList`,
+  `ctrlId`/`isDiverted`, `states`, mit/ohne `deviceId`, in allen denkbaren camelCase-Varianten
+  der oben gefundenen Feldnamen) schlägt wieder mit `INVALID_MESSAGE_RECEIVED` fehl. Das
+  bedeutet: **keiner der bisher aus dem String-Dump abgeleiteten Feldnamen ist exakt richtig**
+  (oder das Feld gehört zu einer anderen Message als vermutet – die Zuordnung "welche Message
+  gehört zu welchem IPC-Pfad" ist aus reinen Strings nicht ableitbar, nur aus dem tatsächlichen
+  Registrierungscode).
+- Auch blindes `SUBSCRIBE` auf naheliegende Pfade (`/devices/trigger_event`, `/trigger_event`,
+  `/devices/test_keys`, `/devices/test_device_keys`, `/devices/special_keys_divert_state`,
+  `/software_events/lps/trigger/event`) brachte **keine** Events beim Drücken von Back/Forward –
+  konsistent mit dem bereits dokumentierten Negativbefund für geratene `SUBSCRIBE`-Pfade
+  (Abschnitt 3.5).
+
+**Bewertung:** Wir sind jetzt sehr nah dran – der Mechanismus existiert nachweislich im Agent
+(nicht nur in der Maus-Firmware), und wir kennen die ungefähre Message-Familie. Was fehlt, ist
+die **exakte Zuordnung Pfad → Message-Typ → Feldnamen**, die sich nicht mehr durch Raten lösen
+lässt (mehrfach mit plausiblen Kandidaten probiert, alle gescheitert). Der nächste sinnvolle
+Schritt ist **keine weitere Raterei**, sondern entweder (a) die echte serialisierte
+`FileDescriptorProto`-Bytefolge sauber extrahieren und mit `google.protobuf.descriptor_pb2`
+parsen (liefert Feldnummern/-typen exakt, aber nicht zwingend die Pfad-Zuordnung), oder (b) in
+Ghidra/objdump den Registrierungscode für den String `"special_keys_divert_state/configure"`
+finden und zurückverfolgen, welcher Message-Typ dort tatsächlich `::ParseFromString`/
+`JsonStringToMessage` aufruft. Siehe Abschnitt 5 für die konkrete Empfehlung.
+
+**Neues Test-Tool:** `~/Devel/logitech-ipc-protocol/test_divert.py` (26.07., Ad-hoc, noch nicht
+committed) – probiert mehrere Payload-Varianten für `/devices/special_keys_divert_state/configure`
+durch. String-Dump der Binary liegt (aktuell nur temporär) unter
+`/var/folders/.../T/opencode/agent_strings.txt` – bei Bedarf einfach neu erzeugen (Befehl s.o.).
+
 ---
 
 ## 4. Tooling: `sniff_button_events.py`
@@ -258,45 +363,56 @@ PinchBars Swift/ObjC++-Stack).
 
 ## 5. Nächste Schritte (priorisiert)
 
-**Zusammenfassung des Stands:** `/input_tracker/*` ist zu Ende getestet (Abschnitt 3.6a/3.6b).
-Es funktioniert technisch einwandfrei (inkl. Re-Arm-Pattern für kontinuierliche Events), aber
-**nicht für die Daumentasten**, die wir eigentlich ansteuern wollen – nur für Standard-Maustasten
-(links/rechts/mitte, generische `hidUsage`-Codes) und Tastatur. Reines API-Raten ist damit
-ausgereizt. Der Fokus verschiebt sich jetzt auf zwei grundsätzlich verschiedene Strategien:
+**Zusammenfassung des Stands:** `/input_tracker/*` ist zu Ende getestet (Abschnitt 3.6a/3.6b) und
+**autoritativ als Sackgasse für Daumentasten bestätigt** (3.6c – vollständiger Filter-Enum
+ausgelesen, kein CID-Wert vorhanden). ABER: Direkt in der Binary wurde eine echte,
+vielversprechende Message-Familie für HID++-CID-Divert-Reporting gefunden
+(`SpecialKeysDivertRequest`, `TestKeyState`, Feature `feature_x1b04_special_keys` – Abschnitt
+3.6c). Der Pfad `/devices/special_keys_divert_state/configure` existiert nachweislich, aber das
+exakte JSON-Feldschema des Requests konnte trotz vieler plausibler Versuche noch nicht gefunden
+werden. Reines Raten (sowohl von Filter-Strings als auch von JSON-Feldnamen) ist jetzt an seiner
+Grenze angekommen.
 
-1. ~~`--filter MOUSE`/`MOUSE_BUTTON`/weitere Enum-Kandidaten testen~~ **erledigt** (siehe 3.6a).
-   `MOUSE_BUTTON` ist korrekt, liefert aber nur Standard-Tasten-Events, keine Daumentasten-Events
-   (3.6b). Weiteres Raten von Filter-Strings ist nicht mehr sinnvoll.
+1. ~~`--filter MOUSE`/`MOUSE_BUTTON`/weitere Enum-Kandidaten testen~~ **erledigt** (3.6a).
+   ~~Gibt es weitere `input_tracker`-Filter-Werte für Zusatztasten?~~ **Erledigt, autoritativ
+   verneint** (3.6c: Enum hat nur `NONE/MOUSE_MOVE/MOUSE_BUTTON/MOUSE_WHEEL/KEYBOARD`).
 
-2. **Strategieentscheidung nötig, bevor es weitergeht** – zwei Optionen, die sich nicht
-   gegenseitig ausschließen, aber unterschiedlichen Aufwand/Erfolgsaussicht haben:
+2. **Strategieentscheidung nötig, bevor es weitergeht** – drei Optionen:
 
-   **Option A: Ghidra-RE des Agent-Binaries, um eine ANDERE/tiefere IPC-Route für
-   HID++-CID-Events zu finden** (falls überhaupt eine existiert – nicht bestätigt, dass
-   `logioptionsplus_agent` CID-Button-Events überhaupt jemals extern broadcastet; könnte sein,
-   dass sie nur intern zwischen Assignment-Engine und Firmware ausgetauscht werden und **niemals**
-   den IPC-Socket erreichen, egal welcher Pfad geraten/gefunden wird).
+   **Option A1 (empfohlen als Nächstes, da am billigsten): Registrierungscode für
+   `special_keys_divert_state/configure` in Ghidra/objdump lokalisieren.** Wir wissen jetzt
+   schon sehr genau, wonach zu suchen ist (deutlich gezielter als noch am Vormittag): Nach dem
+   String `"special_keys_divert_state/configure"` (bzw. dem Suffix davon) im Disassembler
+   suchen, die referenzierende Funktion finden, und von dort zurückverfolgen, welcher konkrete
+   Protobuf-Message-Typ per `JsonStringToMessage`/`ParseFromString` auf das eingehende Payload
+   angewendet wird. Das gibt die exakten Feldnamen ohne weiteres Raten. Deutlich kleinerer Scope
+   als die ursprüngliche "irgendwo im ganzen Binary nach der Route suchen"-Aufgabe aus der
+   vorherigen Planung.
    - `logioptionsplus_agent`-Binary: `/Library/Application Support/Logitech.localized/
      LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent`
-   - Vorgehen: Nach Strings suchen, die nach IPC-Pfaden/Protobuf-Message-Namen aussehen
-     (`divertedButtonsEvent`, `cid_reporting`, `special_keys`, `button_event`, `1b04`, `x1b04`,
-     etc.), von dort zu referenzierenden Funktionen zurückverfolgen. Falls Reflection-Support
-     nicht gestrippt ist: eingebetteten `FileDescriptorProto`-Pool extrahieren (Python-Skript mit
-     `google.protobuf.descriptor_pb2`, linear nach parsebaren Blöcken suchen – schneller als
-     Ghidra-UI, kein RE-Tool nötig).
-   - **Realistische Erwartungshaltung:** Das ist ein Reverse-Engineering-Vorhaben mit offenem
-     Ausgang, kein garantierter Fund.
+   - String-Dump liegt bereits vor (siehe 3.6c), kann bei Bedarf neu erzeugt werden.
+   - Alternative ohne Ghidra: `google.protobuf.descriptor_pb2.FileDescriptorProto` auf die rohen
+     Bytes des Descriptor-Pools anwenden (exakte Feldnummern/-typen), auch wenn das nicht
+     automatisch die Pfad→Message-Zuordnung liefert – dafür bräuchte es zusätzlich den
+     Registrierungscode.
+
+   **Option A2 (Alternative/Ergänzung): MITM-Proxy während einer versteckten Test-/Debug-Ansicht
+   der UI.** Die gefundenen `Test*`-Messages (`TestKeyState`, `TestDeviceKeysState`,
+   `TestCidList`) deuten auf eine interne QA-/Debug-Oberfläche hin, die diesen Pfad evtl.
+   tatsächlich benutzt. Unklar, ob/wie diese in der normalen UI erreichbar ist (evtl. über ein
+   verstecktes Debug-Menü, Rechtsklick-Kontextmenü mit Modifier-Taste, oder eine Env-Variable
+   beim Start des Agents). Falls auffindbar: mit `sniff_button_events.py proxy` mitschneiden –
+   das gibt uns die korrekte Payload direkt "for free", ganz ohne weiteres Feldnamen-Raten.
 
    **Option B: Praktischer Workaround – Maus über Logi-Bolt-USB-Empfänger statt direktem BLE
-   koppeln** (bereits in Abschnitt 3.3 als "bisher nicht verfolgt" notiert, jetzt aber
-   naheliegender, da Option A ungewiss ist). Falls die MX Anywhere 3S per Bolt-Dongle statt
-   direktem BLE gekoppelt wird, ist die HID++-Kommunikation ein normaler USB-HID-Transport, der
-   **nicht** unter die macOS-Bluetooth-Kernel-Sperre fällt. Dann könnte `IOHIDManager` (mit
-   Input-Monitoring-Berechtigung, ganz ohne Options+/IPC-Umweg) `setCidReporting(cid, divert=1)`
-   nutzen und echte `divertedButtonsEvent`-Reports direkt lesen – die technisch sauberste Lösung
-   aus Abschnitt 3.3, aber abhängig davon, ob der Nutzer einen Bolt-Empfänger besitzt/anschaffen
-   möchte. **Offene Frage: Hat der Nutzer einen Logi-Bolt-Empfänger zur Hand oder müsste er einen
-   kaufen?** Das sollte zuerst geklärt werden, bevor Zeit in Option A investiert wird.
+   koppeln** (bereits in Abschnitt 3.3 als "bisher nicht verfolgt" notiert). Falls die MX
+   Anywhere 3S per Bolt-Dongle statt direktem BLE gekoppelt wird, ist die HID++-Kommunikation ein
+   normaler USB-HID-Transport, der **nicht** unter die macOS-Bluetooth-Kernel-Sperre fällt. Dann
+   könnte `IOHIDManager` (mit Input-Monitoring-Berechtigung, ganz ohne Options+/IPC-Umweg)
+   `setCidReporting(cid, divert=1)` nutzen und echte `divertedButtonsEvent`-Reports direkt lesen
+   – die technisch sauberste Lösung aus Abschnitt 3.3, unabhängig vom Options+-IPC-Rätselraten.
+   **Offene Frage: Hat der Nutzer einen Logi-Bolt-Empfänger zur Hand oder müsste er einen
+   kaufen?**
 
 3. **Sobald eine der beiden Optionen tatsächlich CID-Button-Events liefert:** Feldnamen/Struktur
    dokumentieren, dann grober Architektur-Entwurf für eine echte PinchBar-Integration:
