@@ -31,6 +31,17 @@ let ROOT_FEATURE_INDEX: UInt8 = 0x00
 let FEATURE_ID_1B04: UInt16 = 0x1B04
 let CID_NAMES: [UInt16: String] = [80: "Left", 81: "Right", 82: "Middle", 83: "Back", 86: "Forward", 196: "SmartShift"]
 
+// HID++ 2.0 Error-Response-Codes (Byte 3 einer Fehlerantwort). Live verifiziert (28.07.2026):
+// eine Tastatur (MX Keys) auf eine getCidReporting(cid=83)-Anfrage (CID existiert dort nicht)
+// antwortete umgehend mit `ff <origFeatureIndex> <origFuncId<<4|swId> 02 ...` statt gar nicht
+// zu antworten - das ignorierten wir bisher, wodurch wir unnoetig bis zum Timeout warteten.
+let HIDPP_ERROR_NAMES: [UInt8: String] = [
+    0x00: "ERR_NO_ERROR", 0x01: "ERR_UNKNOWN", 0x02: "ERR_INVALID_ARGUMENT",
+    0x03: "ERR_OUT_OF_RANGE", 0x04: "ERR_HW_ERROR", 0x05: "ERR_LOGITECH_INTERNAL",
+    0x06: "ERR_INVALID_FEATURE_INDEX", 0x07: "ERR_INVALID_FUNCTION_ID",
+    0x08: "ERR_BUSY", 0x09: "ERR_UNSUPPORTED",
+]
+
 let cliArgs = CommandLine.arguments.dropFirst().compactMap { UInt16($0) }
 let cidsToCheck: [UInt16] = cliArgs.isEmpty ? [83, 86] : Array(cliArgs)
 
@@ -49,6 +60,7 @@ final class DeviceState {
     var hidppChar: CBCharacteristic?
     var featureIndex: UInt8?
     var queue: [UInt16] = cidsToCheck
+    var lastRequestedCid: UInt16?
     var done = false
 
     init(peripheral: CBPeripheral) { self.peripheral = peripheral }
@@ -114,8 +126,33 @@ final class Checker: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let state = devices[peripheral.identifier] else { return }
-        guard let v = characteristic.value, v.count >= 2 else { return }
+        guard let v = characteristic.value, v.count >= 3 else { return }
         let bytes = [UInt8](v)
+
+        // HID++ 2.0 Error Response: [0xFF, origFeatureIndex, origFuncId<<4|swId, errorCode, ...]
+        // (ein Byte anders "verschoben" als eine normale Antwort - deshalb hier zuerst separat
+        // pruefen statt es als normale Notification zu interpretieren).
+        if bytes[0] == 0xFF {
+            let origFeatureIndex = bytes[1]
+            let origFuncSwId = bytes[2]
+            let errorCode = bytes.count > 3 ? bytes[3] : 0xFF
+            let expectedFeatureIndex = state.featureIndex ?? ROOT_FEATURE_INDEX
+            let expectedFuncSwId: UInt8 = state.featureIndex == nil ? (0 << 4) | OUR_SW_ID : (2 << 4) | OUR_SW_ID
+            guard origFeatureIndex == expectedFeatureIndex, origFuncSwId == expectedFuncSwId else { return }
+            let errName = HIDPP_ERROR_NAMES[errorCode] ?? "0x\(String(format: "%02x", errorCode))"
+            if state.featureIndex == nil {
+                print("\(state.label): Root.getFeature(0x1B04) -> Fehler \(errName) - ignoriere Geraet.")
+                state.done = true
+                exitIfAllDone()
+            } else {
+                let cid = state.lastRequestedCid.map { "\($0)(\(CID_NAMES[$0] ?? "?"))" } ?? "?"
+                print("\(state.label): getCidReporting(cid=\(cid)) -> Fehler \(errName) (Geraet hat diese CID nicht).")
+                askNext(peripheral: peripheral, state: state)
+            }
+            return
+        }
+
+        guard v.count >= 2 else { return }
         let fIdx = bytes[0]
         let funcId = bytes[1] >> 4
         let swId = bytes[1] & 0x0F
@@ -151,6 +188,7 @@ final class Checker: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         let cid = state.queue.removeFirst()
+        state.lastRequestedCid = cid
         let params: [UInt8] = [UInt8((cid >> 8) & 0xFF), UInt8(cid & 0xFF)]
         let req = hidppFrame(featureIndex: fi, funcId: 0x02, swId: OUR_SW_ID, params: params)
         peripheral.writeValue(req, for: c, type: .withResponse)

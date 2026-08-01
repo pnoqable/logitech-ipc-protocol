@@ -178,6 +178,18 @@ final class Client: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         guard let v = characteristic.value, v.count >= 2 else { return }
         let bytes = [UInt8](v)
+
+        // HID++ 2.0 Error Response: [0xFF, origFeatureIndex, origFuncId<<4|swId, errorCode, ...]
+        // (nur relevant, solange wir noch auf die Root.getFeature-Antwort warten - danach
+        // interessieren uns nur noch divertedButtonsEvent-Notifications).
+        if state.featureIndex == nil, bytes[0] == 0xFF, bytes.count >= 3,
+           bytes[1] == ROOT_FEATURE_INDEX, bytes[2] == ((0 << 4) | OUR_SW_ID) {
+            let errorCode = bytes.count > 3 ? bytes[3] : 0xFF
+            print("\(state.label): Root.getFeature(0x1B04) -> Fehler 0x\(String(format: "%02x", errorCode)) "
+                  + "- ignoriere dieses Geraet.")
+            return
+        }
+
         let featureIndex = bytes[0]
         let funcId = bytes[1] >> 4
         let swId = bytes[1] & 0x0F

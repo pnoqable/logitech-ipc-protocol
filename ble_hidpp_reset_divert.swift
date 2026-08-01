@@ -29,6 +29,16 @@ let ROOT_FEATURE_INDEX: UInt8 = 0x00
 let FEATURE_ID_1B04: UInt16 = 0x1B04
 let CID_NAMES: [UInt16: String] = [80: "Left", 81: "Right", 82: "Middle", 83: "Back", 86: "Forward", 196: "SmartShift"]
 
+// HID++ 2.0 Error-Response-Codes (Byte 3 einer Fehlerantwort: [0xFF, origFeatureIndex,
+// origFuncId<<4|swId, errorCode, ...]). Siehe `ble_hidpp_check_divert_state.swift` fuer die
+// Live-Verifikation (28.07.2026, Anfrage an eine Tastatur ohne die abgefragte CID).
+let HIDPP_ERROR_NAMES: [UInt8: String] = [
+    0x00: "ERR_NO_ERROR", 0x01: "ERR_UNKNOWN", 0x02: "ERR_INVALID_ARGUMENT",
+    0x03: "ERR_OUT_OF_RANGE", 0x04: "ERR_HW_ERROR", 0x05: "ERR_LOGITECH_INTERNAL",
+    0x06: "ERR_INVALID_FEATURE_INDEX", 0x07: "ERR_INVALID_FUNCTION_ID",
+    0x08: "ERR_BUSY", 0x09: "ERR_UNSUPPORTED",
+]
+
 let cliArgs = CommandLine.arguments.dropFirst().compactMap { UInt16($0) }
 let cidsToReset: [UInt16] = cliArgs.isEmpty ? [83, 86] : Array(cliArgs)
 
@@ -115,8 +125,21 @@ final class Resetter: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let state = devices[peripheral.identifier], state.featureIndex == nil else { return }
-        guard let v = characteristic.value, v.count >= 2 else { return }
+        guard let v = characteristic.value, v.count >= 3 else { return }
         let bytes = [UInt8](v)
+
+        // HID++ 2.0 Error Response: [0xFF, origFeatureIndex, origFuncId<<4|swId, errorCode, ...]
+        if bytes[0] == 0xFF {
+            guard bytes[1] == ROOT_FEATURE_INDEX, bytes[2] == ((0 << 4) | OUR_SW_ID) else { return }
+            let errorCode = bytes.count > 3 ? bytes[3] : 0xFF
+            let errName = HIDPP_ERROR_NAMES[errorCode] ?? "0x\(String(format: "%02x", errorCode))"
+            print("\(state.label): Root.getFeature(0x1B04) -> Fehler \(errName) - ueberspringe.")
+            state.done = true
+            exitIfAllDone()
+            return
+        }
+
+        guard v.count >= 2 else { return }
         let fIdx = bytes[0]
         let funcId = bytes[1] >> 4
         let swId = bytes[1] & 0x0F

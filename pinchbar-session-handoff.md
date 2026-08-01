@@ -332,6 +332,20 @@ der Anfrage.
   Benutzung) - Logik ist aber analog zur BLE-Variante und in sich konsistent.
 - `ble_hidpp_probe.swift`: bewusst NICHT angefasst (als obsolet markiert, siehe Tooling-Tabelle).
 
+**✅ Bugfix: HID++ 2.0 Error-Response-Erkennung (28.07.2026, ~15:00 CEST):** Multi-Device
+brachte einen Nebeneffekt zutage - `ble_hidpp_check_divert_state.swift` fragte auch
+Nicht-Maus-Geräte (MX Keys, eine Tastatur) nach CID 83/86 ab, die dort gar nicht existieren.
+Live verifiziert: die Tastatur antwortet darauf NICHT mit Schweigen, sondern mit einer
+echten **HID++ 2.0 Error Response** (`ff <origFeatureIndex> <origFuncId<<4|swId> <errorCode>`,
+z. B. `ff0824020000...` = Fehlercode `0x02` = `ERR_INVALID_ARGUMENT`) - die bisher schlicht
+ignoriert wurde, wodurch das Skript bis zum vollen Timeout (15s) wartete statt sofort
+weiterzumachen. Fix: Error-Response-Erkennung (`bytes[0]==0xFF`) in
+`ble_hidpp_check_divert_state.swift`, `ble_hidpp_reset_divert.swift` und
+`ble_hidpp_thumb_buttons.swift` (Root.getFeature-Antwort) ergänzt, inkl. Klartext-Fehlercodes
+(`HIDPP_ERROR_NAMES`-Dictionary: `ERR_INVALID_ARGUMENT`, `ERR_UNSUPPORTED`, etc.). Ergebnis:
+Laufzeit für `ble_hidpp_check_divert_state.swift` mit einer Tastatur im Geräte-Mix sank von
+~15s auf ~1,1s, mit klarer Fehlermeldung pro CID/Gerät statt stillem Warten.
+
 **Damit ist Abschnitt 4 vollständig abgeschlossen.** Nächste Schritte siehe Abschnitt 6
 (PinchBar-Integration).
 
