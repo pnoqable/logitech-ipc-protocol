@@ -1,48 +1,44 @@
-// CoreBluetooth GATT probe for the Logitech MX Anywhere 3.
+// CoreBluetooth GATT probe fuer ALLE aktuell verbundenen Logitech-Geraete.
 //
 // Purpose: verify whether raw HID++ frames can be sent/received via CoreBluetooth GATT
 // (a different API layer than IOHIDManager, which macOS blocks for Bluetooth *input*
-// devices). If the mouse exposes either:
-//   (a) a Logitech vendor-specific GATT service, or
-//   (b) the standard HID-over-GATT service (0x1812) with readable/writable Report
-//       characteristics
-// then it may be possible to read/write HID++ short/long reports through CoreBluetooth
-// even though IOHIDDeviceOpen() is blocked for this device.
+// devices). Dumpt Services/Characteristics/Properties fuer jedes gefundene Geraet.
 //
-// This is read-only reconnaissance: it lists all services/characteristics/properties. It
-// does NOT yet attempt to write HID++ frames - that's the next step once we know which
-// characteristic (if any) looks like the right one.
+// GERAETE-ERKENNUNG (28.07.2026): KEINE Namenspruefung mehr! Es werden (a) alle bereits
+// verbundenen Peripherals ueber die Standard-Services 1812/180F/180A/1800 gefunden, und
+// (b) zusaetzlich per Scan alle advertisenden Peripherals deren BLE-Manufacturer-Company-ID
+// 0x0060 (Bluetooth SIG Company Identifier fuer Logitech) ist. Beide Wege liefern
+// Kandidaten, die dann per GATT-Service-Discovery weiter gefiltert werden (Vendor-Service
+// mit UUID-Suffix "046D" = Logitechs USB-Vendor-ID).
 //
-// Requires the MX Anywhere 3 to be actively paired via direct macOS Bluetooth (not via the
-// Unifying dongle) so a BLE connection can be established.
+// Requires: mindestens eine Logitech-Maus/-Tastatur aktiv per direktem macOS-Bluetooth
+// gekoppelt (nicht ueber den Unifying-Dongle) damit eine BLE-Verbindung moeglich ist.
 //
 // Usage:
 //   swift ble_gatt_probe.swift
 //
-// The first run will likely trigger a macOS Bluetooth permission prompt for the terminal
-// app being used to run this (Terminal/iTerm) - grant it under System Settings > Privacy &
-// Security > Bluetooth if not prompted automatically.
+// Der erste Lauf kann einen macOS-Bluetooth-Berechtigungsdialog fuer die Terminal-App
+// ausloesen - unter Systemeinstellungen > Datenschutz & Sicherheit > Bluetooth erlauben,
+// falls nicht automatisch gefragt wird.
 
 import Foundation
 import CoreBluetooth
 
-let targetNameSubstrings = ["MX Anywhere", "Anywhere 3"]
 let scanTimeoutSeconds = 20.0
-let hidServiceUUID = CBUUID(string: "1812") // standard HID-over-GATT
-// Additional standard services the OS may have already cached for this peripheral
-// (populated when macOS itself did a GATT read for e.g. battery level).
+// Standard-Services, ueber die macOS bereits verbundene (nicht mehr advertisende)
+// Peripherals findet - unabhaengig vom Hersteller.
 let candidateServiceUUIDs = [
     CBUUID(string: "1812"), // Human Interface Device
     CBUUID(string: "180F"), // Battery Service
     CBUUID(string: "180A"), // Device Information
     CBUUID(string: "1800"), // Generic Access
 ]
-let logitechCompanyID: UInt16 = 0x0060 // Bluetooth SIG assigned company identifier for Logitech
+let logitechCompanyID: UInt16 = 0x0060 // Bluetooth SIG assigned company identifier fuer Logitech
+let LOGITECH_VENDOR_UUID_SUFFIX = "046D" // Logitechs USB-Vendor-ID als Suffix in vendor-spez. UUIDs
 
 final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     var central: CBCentralManager!
-    var target: CBPeripheral?
-    var startTime = Date()
+    var targets: [UUID: CBPeripheral] = [:]
 
     func start() {
         central = CBCentralManager(delegate: self, queue: nil)
@@ -59,46 +55,40 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
-        // Check already-connected/known peripherals first. A peripheral already connected
-        // via the system Bluetooth HID stack won't be advertising anymore, so scanning alone
-        // won't find it - we must ask CoreBluetooth for peripherals it already knows about
-        // that expose any of these cached standard services.
+        // Bereits verbundene Peripherals (advertisen nicht mehr, muessen ueber ihre
+        // gecachten Standard-Services gefunden werden).
         for uuid in candidateServiceUUIDs {
-            let known = c.retrieveConnectedPeripherals(withServices: [uuid])
-            for p in known {
-                print("Bereits verbundenes Peripheral (via Service \(uuid)): \(p.name ?? "?") \(p.identifier)")
-                if target == nil {
-                    target = p
-                    p.delegate = self
-                    print("-> verbinde ...")
-                    c.connect(p, options: nil)
-                }
+            for p in c.retrieveConnectedPeripherals(withServices: [uuid]) {
+                connectIfNew(p, via: "bereits verbunden (Service \(uuid))")
             }
         }
 
-        print("Scanne nach BLE-Peripherals (\(Int(scanTimeoutSeconds))s Timeout, Ziel-Name enthaelt " +
-              "\(targetNameSubstrings))) ...")
-        startTime = Date()
+        print("Scanne zusaetzlich nach advertisenden Logitech-Peripherals "
+              + "(\(Int(scanTimeoutSeconds))s Timeout, Manufacturer-Company-ID 0x0060) ...")
         c.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
 
         DispatchQueue.main.asyncAfter(deadline: .now() + scanTimeoutSeconds) {
-            if self.target == nil {
-                print("\nTimeout: kein passendes Geraet gefunden. Ist die Maus per Bluetooth " +
-                      "gekoppelt (nicht ueber den Dongle) und in Reichweite?")
+            c.stopScan()
+            if self.targets.isEmpty {
+                print("\nTimeout: keine Geraete gefunden. Ist mindestens eine Logitech-Maus/-Tastatur " +
+                      "per Bluetooth gekoppelt (nicht ueber den Dongle) und in Reichweite?")
                 exit(1)
             }
         }
     }
 
+    func connectIfNew(_ p: CBPeripheral, via reason: String) {
+        guard targets[p.identifier] == nil else { return }
+        targets[p.identifier] = p
+        p.delegate = self
+        print("Kandidat gefunden: \(p.name ?? "?")  id=\(p.identifier)  [\(reason)] -> verbinde ...")
+        central.connect(p, options: nil)
+    }
+
     func centralManager(_ c: CBCentralManager, didDiscover peripheral: CBPeripheral,
                          advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "(unbekannt)"
-        let svcUUIDs = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
-        var extra = ""
-        if !svcUUIDs.isEmpty {
-            extra += " services=\(svcUUIDs.map { $0.uuidString })"
-        }
         var isLogitech = false
+        var extra = ""
         if let mfg = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, mfg.count >= 2 {
             let companyID = UInt16(mfg[0]) | (UInt16(mfg[1]) << 8)
             extra += " mfgCompanyID=0x\(String(format: "%04X", companyID))"
@@ -107,15 +97,9 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                 extra += " <<< LOGITECH"
             }
         }
-        print("gefunden: \(name)  id=\(peripheral.identifier)  rssi=\(RSSI)\(extra)")
-
-        let isTarget = targetNameSubstrings.contains { name.range(of: $0, options: .caseInsensitive) != nil } || isLogitech
-        if isTarget && target == nil {
-            target = peripheral
-            print("-> Ziel gefunden, verbinde ...")
-            c.stopScan()
-            peripheral.delegate = self
-            c.connect(peripheral, options: nil)
+        if isLogitech {
+            print("advertisement: \(peripheral.name ?? "(unbekannt)")  rssi=\(RSSI)\(extra)")
+            connectIfNew(peripheral, via: "Scan, mfgCompanyID=Logitech")
         }
     }
 
@@ -125,31 +109,38 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManager(_ c: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        print("Verbindung fehlgeschlagen: \(error?.localizedDescription ?? "unbekannt")")
-        exit(1)
+        print("Verbindung zu \(peripheral.name ?? "?") fehlgeschlagen: \(error?.localizedDescription ?? "unbekannt")")
+        targets.removeValue(forKey: peripheral.identifier)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error = error {
-            print("Fehler beim Service-Discovery: \(error.localizedDescription)")
+            print("[\(peripheral.name ?? "?")] Fehler beim Service-Discovery: \(error.localizedDescription)")
             return
         }
         guard let services = peripheral.services else { return }
-        print("\n\(services.count) Service(s) gefunden:")
+        print("\n[\(peripheral.name ?? "?")] \(services.count) Service(s) gefunden:")
+        var hasVendorService = false
         for service in services {
-            print("  Service \(service.uuid) \(isStandard(service.uuid) ? "(standard)" : "(VENDOR-SPEZIFISCH)")")
+            let isVendor = isLogitechVendorService(service.uuid)
+            if isVendor { hasVendorService = true }
+            print("  Service \(service.uuid) \(isStandard(service.uuid) ? "(standard)" : isVendor ? "(LOGITECH VENDOR)" : "(vendor, unbekannt)")")
             peripheral.discoverCharacteristics(nil, for: service)
+        }
+        if !hasVendorService {
+            print("  -> kein Logitech-Vendor-Service (Suffix \(LOGITECH_VENDOR_UUID_SUFFIX)) gefunden.")
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error = error {
-            print("  Fehler beim Characteristic-Discovery fuer \(service.uuid): \(error.localizedDescription)")
+            print("  [\(peripheral.name ?? "?")] Fehler beim Characteristic-Discovery fuer \(service.uuid): "
+                  + "\(error.localizedDescription)")
             return
         }
         guard let chars = service.characteristics else { return }
         for c in chars {
-            print("    Characteristic \(c.uuid)  properties=\(describeProps(c.properties))")
+            print("    [\(peripheral.name ?? "?")] Characteristic \(c.uuid)  properties=\(describeProps(c.properties))")
             if c.properties.contains(.read) {
                 peripheral.readValue(for: c)
             }
@@ -158,8 +149,13 @@ final class Prober: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let value = characteristic.value {
-            print("      Wert von \(characteristic.uuid): \(value.map { String(format: "%02x", $0) }.joined())")
+            print("      [\(peripheral.name ?? "?")] Wert von \(characteristic.uuid): "
+                  + "\(value.map { String(format: "%02x", $0) }.joined())")
         }
+    }
+
+    func isLogitechVendorService(_ uuid: CBUUID) -> Bool {
+        uuid.uuidString.uppercased().hasSuffix(LOGITECH_VENDOR_UUID_SUFFIX)
     }
 
     func isStandard(_ uuid: CBUUID) -> Bool {

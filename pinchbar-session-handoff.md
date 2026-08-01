@@ -1,8 +1,10 @@
 # PinchBar × Logitech HID++ – Session-Handoff
 
-**Stand:** 27.07.2026, ca. 00:20 CEST. **Kernziel technisch erreicht** – Back/Forward liefern
-jetzt live verifiziert echte Down/Up-Events über direktes Bluetooth (kein Dongle nötig). Fokus
-verschiebt sich auf PinchBar-Integration (Abschnitt 6).
+**Stand:** 28.07.2026, ca. 14:20 CEST. **Kernziel technisch erreicht** – Back/Forward liefern
+live verifiziert echte Down/Up-Events über direktes Bluetooth (kein Dongle nötig). **Alle
+Tools wurden zusätzlich auf Multi-Device umgebaut** (alle aktuell verbundenen Logitech-Geräte
+gleichzeitig, keine Namensprüfung mehr, siehe Abschnitt 4 Ende). Fokus verschiebt sich auf
+PinchBar-Integration (Abschnitt 6).
 
 **Ziel:** Die Daumentasten (Back/Forward, HID++ CID 83/86) der Logitech MX Anywhere 3
 (gekoppelt via macOS-Bluetooth) als echte Down/Up-Events für PinchBar (`~/Devel/PinchBar`,
@@ -283,6 +285,53 @@ Tool muss `divert` gar nicht selbst setzen und beim Beenden nichts zurücksetzen
 - Live erneut getestet (inkl. `kill -INT` auf die vereinfachte Version): Events kommen weiter
   sauber an, Prozess beendet sich jetzt zuverlässig.
 
+**✅ Multi-Device-Umbau (28.07.2026, ~14:00–14:20 CEST):** Auf Nutzerwunsch alle BLE-Tools
+so umgebaut, dass sie automatisch **alle aktuell verbundenen Logitech-Geräte gleichzeitig**
+bedienen, statt nur eine per Name fest verdrahtete Maus (`targetName = "MX Anywhere 3"`
+komplett entfernt).
+
+**Erkennungsmechanismus (namenslos, wie vom Nutzer gewünscht):** Zuerst werden über die
+Standard-BLE-Services `1812`/`180F`/`180A`/`1800` alle bei macOS als "verbunden" bekannten
+Peripherals abgefragt (`retrieveConnectedPeripherals(withServices:)`, herstellerunabhängig).
+Danach wird für jedes gefundene Peripheral per GATT-Service-Discovery geprüft, ob es einen
+Service mit einer UUID hat, die auf **`046D` endet (Logitechs USB-Vendor-ID in Hex)** – z. B.
+`00010000-0000-1000-8000-011F2000046D`. Nur dann gilt es als "Logitech HID++-fähig" und wird
+weiterverarbeitet; alles andere (z. B. AirPods, andere BT-Geräte) wird ignoriert. **Live
+verifiziert:** MX Anywhere 3, MX Keys und M720 Triathlon liefern alle exakt denselben
+Vendor-Service-UUID-Suffix – zuverlässiger Marker, komplett ohne Namensvergleich.
+
+**Live-Test mit 3 gleichzeitig verbundenen Geräten** (MX Anywhere 3, MX Keys, M720
+Triathlon): `ble_hidpp_thumb_buttons.swift` fand alle drei automatisch, verband sich mit
+jedem einzeln, und ermittelte für jedes unabhängig per `Root.getFeature(0x1B04)` den
+korrekten (je nach Gerät unterschiedlichen!) `featureIndex`:
+```
+MX Anywhere 3:   featureIndex=0x09
+MX Keys:         featureIndex=0x08
+M720 Triathlon:  featureIndex=0x0b
+```
+`ble_hidpp_check_divert_state.swift` (ebenfalls umgebaut) bestätigte zusätzlich für M720
+Triathlon `divert=1, persist=0` für CID 83/86 – identisches Verhalten wie bei der MX
+Anywhere 3 (dauerhaft divertiert, siehe oben). **Noch nicht mit echtem Tastendruck auf der
+M720 verifiziert** (Nutzer hat die MX Anywhere 3 während des Tests an einen anderen PC
+umgesteckt, M720-Tastendruck-Test stand bei Sessionende noch aus) – Verbindung/Feature-
+Erkennung funktioniert aber nachweislich für alle drei Geräte gleichzeitig, das war der Kern
+der Anfrage.
+
+**Betroffene/umgebaute Dateien:**
+- `ble_hidpp_thumb_buttons.swift`: Kernumbau, `DeviceState`-Klasse pro Peripheral (eigener
+  `hidppChar`/`featureIndex`/`pressedCids`), Output jetzt mit `[Geraetename]`-Präfix pro Zeile.
+- `ble_hidpp_check_divert_state.swift`, `ble_hidpp_reset_divert.swift`: gleiches Muster,
+  arbeiten jetzt über alle erkannten Geräte statt nur eines.
+- `ble_gatt_probe.swift`: verbindet sich jetzt mit allen gefundenen Kandidaten (verbunden
+  UND per Scan mit Logitech-Manufacturer-Company-ID `0x0060` gefunden), nicht nur dem ersten.
+- `hidpp_thumb_buttons.py` (USB-Dongle): `find_mx_anywhere_3()` →
+  `find_all_devices_with_thumb_buttons()`, iteriert jetzt über ALLE Device-Indizes 0x01-0x06
+  mit CID 83 oder 86 (nicht mehr nur den ersten Treffer mit CIDs {82,83,86}), divertiert und
+  lauscht auf alle gleichzeitig, Output mit `[devIdx=0x0X]`-Präfix. **Noch nicht mit echter
+  Mehrfach-Kopplung am selben Dongle live getestet** (aktuell nur eine Maus pro Dongle in
+  Benutzung) - Logik ist aber analog zur BLE-Variante und in sich konsistent.
+- `ble_hidpp_probe.swift`: bewusst NICHT angefasst (als obsolet markiert, siehe Tooling-Tabelle).
+
 **Damit ist Abschnitt 4 vollständig abgeschlossen.** Nächste Schritte siehe Abschnitt 6
 (PinchBar-Integration).
 
@@ -294,12 +343,12 @@ Tool muss `divert` gar nicht selbst setzen und beim Beenden nichts zurücksetzen
 
 | Tool | Zweck | Status |
 |---|---|---|
-| `hidpp_thumb_buttons.py` | Rohes HID++ 2.0 über Unifying-Dongle, Back/Forward Down/Up-Events | ✅ fertig |
-| `ble_gatt_probe.swift` | CoreBluetooth Service/Characteristic-Discovery | ✅ funktioniert |
+| `hidpp_thumb_buttons.py` | Rohes HID++ 2.0 über Unifying-Dongle, Back/Forward Down/Up-Events, **alle Geräte am Dongle gleichzeitig** | ✅ fertig |
+| `ble_gatt_probe.swift` | CoreBluetooth Service/Characteristic-Discovery, **alle verbundenen/advertisenden Logitech-Geräte** | ✅ funktioniert |
 | `ble_hidpp_probe.swift` | Alte Framing-Hypothesen-Experimente (historisch) | 🗄️ obsolet, durch `ble_hidpp_thumb_buttons.swift` ersetzt |
-| **`ble_hidpp_thumb_buttons.swift`** | **Back/Forward Down/Up-Events über direktes Bluetooth (kein Dongle)** | **✅ fertig, live verifiziert** |
-| `ble_hidpp_check_divert_state.swift` | Reiner GET-Check von divert/persist/rawXY/remap für beliebige CIDs (ändert nichts) | ✅ fertig, funktioniert |
-| `ble_hidpp_reset_divert.swift` | Setzt `divert=0` für beliebige CIDs (manuelles Aufräumen nach Testläufen) | ✅ fertig, funktioniert |
+| **`ble_hidpp_thumb_buttons.swift`** | **Back/Forward Down/Up-Events über direktes Bluetooth, für ALLE aktuell verbundenen Logitech-Geräte gleichzeitig (keine Namensprüfung, Erkennung über Vendor-Service-UUID-Suffix `046D`)** | **✅ fertig, live verifiziert** |
+| `ble_hidpp_check_divert_state.swift` | Reiner GET-Check von divert/persist/rawXY/remap für beliebige CIDs, **über alle erkannten Geräte** (ändert nichts) | ✅ fertig, funktioniert |
+| `ble_hidpp_reset_divert.swift` | Setzt `divert=0` für beliebige CIDs, **über alle erkannten Geräte** (manuelles Aufräumen nach Testläufen) | ✅ fertig, funktioniert |
 | `ble_pklg_decode.py` | Parst `.pklg`-Packet-Sniffs selbst (kein Wireshark nötig), decodiert Feature 0x1B04 | ✅ fertig, funktioniert |
 | `sniff_button_events.py` | Options+-IPC: `devices`, `subscribe`, `input_tracker`, `proxy`, `ws` | ✅ (siehe unten) |
 | `sniff_repeat.py` | Re-Arm-Loop für `input_tracker` | ✅ (nicht committed) |

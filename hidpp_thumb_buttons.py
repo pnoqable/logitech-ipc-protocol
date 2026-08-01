@@ -1,7 +1,15 @@
 """
-Raw HID++ 2.0 access to the Logitech Unifying dongle: find the MX Anywhere 3's
-thumb buttons (CID 83 = Back, CID 86 = Forward), divert them to software, and
-decode incoming divertedButtonsEvent notifications as clean Down/Up events.
+Raw HID++ 2.0 access to the Logitech Unifying dongle: find the thumb buttons
+(CID 83 = Back, CID 86 = Forward) of ALL currently paired Logitech mice on the
+dongle (not just one), divert them to software, and decode incoming
+divertedButtonsEvent notifications as clean Down/Up events, per device.
+
+Device discovery (28.07.2026): no product/name check - every device index
+0x01-0x06 that supports feature 0x1B04 AND lists CID 83 or 86 in its control ID
+table is treated as a target, regardless of which specific mouse it is. A
+Unifying dongle can have up to 6 paired devices simultaneously (e.g. MX
+Anywhere 3 + M720 Triathlon at the same time) - all of them get diverted and
+listened to in the same run.
 
 Byte-format reference (feature 0x1B04, "Special Keys and Mouse Buttons"):
     https://lekensteyn.nl/files/logitech/x1b04_specialkeysmsebuttons.html
@@ -150,11 +158,15 @@ def get_cid_table(h, devidx, featidx):
     return entries
 
 
-def find_mx_anywhere_3(h):
-    """Try device indices 0x01-0x06, return (devidx, featidx) of the device whose
-    x1b04 CID table contains Back/Forward/Middle (i.e. the mouse, not the keyboard
-    also hanging off the same dongle).
+def find_all_devices_with_thumb_buttons(h):
+    """Try device indices 0x01-0x06, return a list of (devidx, featidx) for every
+    device whose x1b04 CID table contains CID 83 (Back) or 86 (Forward) - i.e.
+    every mouse with thumb buttons on the dongle, not just the first one found.
+    Devices without feature 0x1B04 (e.g. a keyboard on the same dongle without
+    diverted-key needs) or without CID 83/86 (e.g. a mouse with no thumb
+    buttons) are skipped.
     """
+    found = []
     for devidx in range(1, 7):
         featidx = get_feature_index(h, devidx, FEATURE_ID_1B04)
         if featidx is None:
@@ -162,9 +174,9 @@ def find_mx_anywhere_3(h):
         cids = {cid for cid, _flags in get_cid_table(h, devidx, featidx)}
         print(f"  device index 0x{devidx:02X}: feature 0x1B04 @ index 0x{featidx:02X}, "
               f"CIDs = {sorted(cids)}")
-        if {82, 83, 86}.issubset(cids):
-            return devidx, featidx
-    return None, None
+        if {83, 86} & cids:
+            found.append((devidx, featidx))
+    return found
 
 
 def set_cid_reporting(h, devidx, featidx, cid, divert):
@@ -204,47 +216,54 @@ def main():
     h = hid.Device(path=path)
     print(f"  geoeffnet: {h.manufacturer} / {h.product}")
 
-    print("\nSuche MX Anywhere 3 unter Device-Indizes 0x01-0x06 ...")
-    devidx, featidx = find_mx_anywhere_3(h)
-    if devidx is None:
-        print("MX Anywhere 3 nicht gefunden (kein Device-Index mit CIDs 82/83/86).")
+    print("\nSuche alle Geraete mit Back/Forward unter Device-Indizes 0x01-0x06 ...")
+    devices = find_all_devices_with_thumb_buttons(h)
+    if not devices:
+        print("Kein Geraet mit CID 83/86 gefunden (kein Geraet mit Feature 0x1B04+Thumb-Buttons "
+              "am Dongle gepaart).")
         h.close()
         sys.exit(1)
-    print(f"-> MX Anywhere 3 = Device-Index 0x{devidx:02X}, Feature 0x1B04 @ Index 0x{featidx:02X}")
+    print(f"-> {len(devices)} Geraet(e) gefunden: "
+          + ", ".join(f"devIdx=0x{d:02X}" for d, _ in devices))
 
-    print("\nVolle CID-Tabelle:")
-    for cid, flags in get_cid_table(h, devidx, featidx):
-        mouse = flags & 0x01
-        divert = (flags >> 5) & 0x01
-        persist = (flags >> 6) & 0x01
-        print(f"  {cid_name(cid):12s} cid={cid:3d} (0x{cid:02X})  flags=0x{flags:02X}  "
-              f"mouse={mouse} divertable={divert} persist={persist}")
+    for devidx, featidx in devices:
+        print(f"\nVolle CID-Tabelle fuer devIdx=0x{devidx:02X}:")
+        for cid, flags in get_cid_table(h, devidx, featidx):
+            mouse = flags & 0x01
+            divert = (flags >> 5) & 0x01
+            persist = (flags >> 6) & 0x01
+            print(f"  {cid_name(cid):12s} cid={cid:3d} (0x{cid:02X})  flags=0x{flags:02X}  "
+                  f"mouse={mouse} divertable={divert} persist={persist}")
 
-    print(f"\nDivertiere CIDs {DIVERT_CIDS} (Back/Forward) ...")
-    for cid in DIVERT_CIDS:
-        status, resp = set_cid_reporting(h, devidx, featidx, cid, divert=True)
-        ok = "OK" if status == "ok" else status
-        print(f"  setCidReporting({cid_name(cid)}={cid}, divert=1): {ok}")
+    print(f"\nDivertiere CIDs {DIVERT_CIDS} (Back/Forward) auf allen gefundenen Geraeten ...")
+    for devidx, featidx in devices:
+        for cid in DIVERT_CIDS:
+            status, resp = set_cid_reporting(h, devidx, featidx, cid, divert=True)
+            ok = "OK" if status == "ok" else status
+            print(f"  devIdx=0x{devidx:02X} setCidReporting({cid_name(cid)}={cid}, divert=1): {ok}")
 
     def restore(*_args):
-        print("\nSetze Divert zurueck (divert=0) ...")
-        for cid in DIVERT_CIDS:
-            set_cid_reporting(h, devidx, featidx, cid, divert=False)
+        print("\nSetze Divert zurueck (divert=0) auf allen Geraeten ...")
+        for devidx, featidx in devices:
+            for cid in DIVERT_CIDS:
+                set_cid_reporting(h, devidx, featidx, cid, divert=False)
         h.close()
         print("Beendet.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, restore)
 
-    print("\nBereit. Bitte jetzt Back/Forward an der MX Anywhere 3 druecken "
+    device_by_idx = {devidx: featidx for devidx, featidx in devices}
+    print("\nBereit. Bitte jetzt Back/Forward an einer der gefundenen Maeuse druecken "
           "(Ctrl-C zum Beenden) ...\n")
 
-    pressed = set()
+    pressed_by_device = {devidx: set() for devidx, _ in devices}
     while True:
         resp = h.read(32, timeout=500)
         if not resp:
             continue
-        if resp[1] != devidx or resp[2] != featidx:
+        devidx = resp[1]
+        if devidx not in device_by_idx or resp[2] != device_by_idx[devidx]:
             continue
         fsw = resp[3]
         swid = fsw & 0x0F
@@ -255,11 +274,12 @@ def main():
             continue  # not divertedButtonsEvent (event index 0)
 
         now_pressed = set(decode_diverted_buttons_event(resp))
+        pressed = pressed_by_device[devidx]
         for cid in now_pressed - pressed:
-            print(f"DOWN  {cid_name(cid)} (cid={cid})")
+            print(f"[devIdx=0x{devidx:02X}] DOWN  {cid_name(cid)} (cid={cid})")
         for cid in pressed - now_pressed:
-            print(f"UP    {cid_name(cid)} (cid={cid})")
-        pressed = now_pressed
+            print(f"[devIdx=0x{devidx:02X}] UP    {cid_name(cid)} (cid={cid})")
+        pressed_by_device[devidx] = now_pressed
 
 
 if __name__ == "__main__":
