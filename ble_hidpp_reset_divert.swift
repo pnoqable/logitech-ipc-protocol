@@ -1,9 +1,10 @@
-// Setzt setCidReporting(cid, divert=0, dvalid=1) fuer die angegebenen CIDs (Default: 83=Back,
+// Setzt setCidReporting(cid, divert=0|1, dvalid=1) fuer die angegebenen CIDs (Default: 83=Back,
 // 86=Forward) ueber direktes Bluetooth-GATT - fuer ALLE aktuell verbundenen Logitech-Geraete
 // gleichzeitig (siehe `ble_hidpp_thumb_buttons.swift` fuer Details zur namenslosen
 // Geraete-Erkennung ueber den Vendor-Service-UUID-Suffix "046D").
 //
-// Nuetzlich zum manuellen Aufraeumen nach abgebrochenen Testlaeufen.
+// Nuetzlich zum manuellen Aufraeumen nach abgebrochenen Testlaeufen, sowie zum gezielten
+// Wiedereinschalten von divert (z.B. um den Logi-Options+-Ausgangszustand wiederherzustellen).
 //
 // Wichtiger Befund (27.07.2026): Auf aktuellen Logi-Options+-Versionen springt divert fuer
 // Back/Forward offenbar von selbst wieder auf 1 zurueck (vermutlich durch den laufenden
@@ -12,8 +13,8 @@
 // nuetzlich fuer gezielte Experimente/Verifikation, aber verlasst euch nicht darauf, dass der
 // Reset dauerhaft haelt.
 //
-// Usage: swift ble_hidpp_reset_divert.swift [cid1 cid2 ...]
-// (ohne Argumente: setzt 83 und 86 auf divert=0)
+// Usage: swift ble_hidpp_reset_divert.swift [on|off] [cid1 cid2 ...]
+// (ohne Argumente: setzt 83 und 86 auf divert=off; "on" schaltet divert stattdessen wieder ein)
 
 import Foundation
 import CoreBluetooth
@@ -39,7 +40,13 @@ let HIDPP_ERROR_NAMES: [UInt8: String] = [
     0x08: "ERR_BUSY", 0x09: "ERR_UNSUPPORTED",
 ]
 
-let cliArgs = CommandLine.arguments.dropFirst().compactMap { UInt16($0) }
+var remainingArgs = Array(CommandLine.arguments.dropFirst())
+var divertOn = false
+if let first = remainingArgs.first?.lowercased(), first == "on" || first == "off" {
+    divertOn = (first == "on")
+    remainingArgs.removeFirst()
+}
+let cliArgs = remainingArgs.compactMap { UInt16($0) }
 let cidsToReset: [UInt16] = cliArgs.isEmpty ? [83, 86] : Array(cliArgs)
 
 func hidppFrame(featureIndex: UInt8, funcId: UInt8, swId: UInt8, params: [UInt8]) -> Data {
@@ -155,8 +162,8 @@ final class Resetter: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         state.featureIndex = params[0]
         guard let c = state.hidppChar else { return }
         for cid in cidsToReset {
-            print("\(state.label): setze divert=0 fuer cid=\(cid)(\(CID_NAMES[cid] ?? "?")) ...")
-            peripheral.writeValue(setCidReportingFrame(featureIndex: params[0], cid: cid, divert: false),
+            print("\(state.label): setze divert=\(divertOn ? 1 : 0) fuer cid=\(cid)(\(CID_NAMES[cid] ?? "?")) ...")
+            peripheral.writeValue(setCidReportingFrame(featureIndex: params[0], cid: cid, divert: divertOn),
                                    for: c, type: .withoutResponse)
         }
         state.done = true
