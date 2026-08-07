@@ -20,6 +20,7 @@ macOS blocks raw HID access to Bluetooth input devices at the kernel level. No p
 | `kvm_daemon_windows.py` | Windows device switching via named pipe, monitor switching via DDC/CI |
 | `kvm_config.ini` | Windows configuration (hotkeys, monitor inputs) |
 | `query_feature_index.py` | Discovers HID++ ChangeHost feature index for Logitech devices (Windows) |
+| `ble_hidpp_feature_dump.swift` | Read-only BLE HID++ feature enumeration; identifies ChangeHost and HostsInfo without querying either feature |
 | `query_agent_windows.py` | Queries the agent on Windows via named pipe |
 | `config.ini` | Legacy UnifiedSwitch configuration (superseded by `kvm_daemon_windows.py`) |
 
@@ -34,6 +35,32 @@ python3 switch_to_windows.py --dry-run 0  # Show what would happen
 ```
 
 Requires Logi Options+ running and `m1ddc` installed (`brew install m1ddc`).
+
+### Read-only Easy-Switch diagnostics (macOS Bluetooth)
+
+With a Logitech device connected directly over Bluetooth, enumerate its HID++ features without
+changing any device state:
+
+```bash
+swift ble_hidpp_feature_dump.swift
+```
+
+The output includes raw request/response frames and marks support for `CHANGE_HOST` (`0x1814`)
+and `HOSTS_INFO` (`0x1815`). It does not invoke either feature.
+
+For a compact read-only Options+/Flow state snapshot, use:
+
+```bash
+python3 logi_device_snapshot.py
+```
+
+See `easy-switch-flow-diagnostics.md` for the verified device capabilities and comparison procedure.
+
+To inspect the Flow channel mapping itself on macOS, use:
+
+```bash
+python3 logi_flow_snapshot.py
+```
 
 ### Windows
 
@@ -50,6 +77,20 @@ python kvm_daemon_windows.py --dry-run
 ```
 
 Requires Logi Options+ running. Install dependencies: `pip install pywin32`.
+
+To reset only the Flow configuration for connected Flow-capable devices on Windows, without
+changing device pairings or switching an Easy-Switch host:
+
+```powershell
+python query_agent_windows.py --reset-flow
+```
+
+If the Flow agent still reports the wrong `selfChannel` after a reset and a verified re-pairing,
+inspect its persisted device channel before changing it:
+
+```powershell
+python repair_flow_channel_windows.py --list
+```
 
 The AHK script listens for Win+1/2/3 and calls `kvm_daemon_windows.py --switch N` for each. The Python script discovers devices from the agent automatically (no hardcoded device IDs or HID paths). Edit `kvm_config.ini` to configure hotkeys and monitor DDC/CI input values.
 

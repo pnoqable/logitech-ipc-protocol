@@ -49,6 +49,16 @@ Investigated native coupled Easy-Switch -- the agent's built-in feature for link
 
 The `kvm.ahk` + `kvm_daemon_windows.py --switch` approach (AHK hotkeys calling one-shot Python switching) is the workaround for devices that lack native coupled support.
 
+## Easy-Switch / Flow Diagnostics
+
+- [x] Add a read-only direct-BLE HID++ feature dump (`ble_hidpp_feature_dump.swift`). It enumerates `FEATURE_SET` and marks `CHANGE_HOST` (`0x1814`) and `HOSTS_INFO` (`0x1815`) if supported, but does not invoke either feature.
+- [x] Capture the local feature dump: MX Anywhere 3 supports `CHANGE_HOST` but not `HOSTS_INFO`; MX Keys supports both. Details: `easy-switch-flow-diagnostics.md`.
+- [x] Capture a Flow reset: the macOS agent stored the Windows peer as Flow channel 3 while the mouse was paired to Easy-Switch slot 2.
+- [x] Reset Windows Flow: peer metadata was cleared, but the mouse retained `selfChannel: 3`; this is not stale Flow configuration.
+- [x] Repair the MX Anywhere 3 Flow XML (`1599074031`): stored channel 2 -> 1, with a timestamped backup.
+- [x] Verify the repaired Windows state: HID++ current host 1, `deviceChannel: 2`, `selfChannel: 2`, and Windows peer channel 2.
+- [ ] Test Flow edge transitions in both directions after the repaired Windows agent state has propagated to macOS.
+
 ## Packaging
 
 - [ ] Proper CLI arg parsing (argparse)
